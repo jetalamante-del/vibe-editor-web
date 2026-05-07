@@ -1,62 +1,67 @@
 /**
- * Hardware-accelerated video player built on the WebCodecs API.
+ * Hardware-accelerated streaming video player.
  *
- * - Uses `VideoDecoder` to push encoded chunks through the OS hardware decoder
- *   (VideoToolbox on macOS, Media Foundation on Windows, VAAPI on Linux).
- * - Renders decoded `VideoFrame`s to a 2D canvas.
- * - Maintains a small ring buffer so playback survives natural decode jitter.
+ * Designed to work with the streaming demuxer ({@link demuxMp4Streaming}) so
+ * that arbitrarily large source files don't force the encoded data to live
+ * in memory. The player keeps a small ring buffer of pending encoded chunks
+ * and a small queue of decoded frames; everything earlier than the playhead
+ * is closed and dropped.
  *
- * This intentionally keeps the API small: configure once, then `play`, `pause`,
- * `seek` against the timeline. Effects, compositing and audio sit at higher
- * layers and consume the same `VideoFrame` stream.
+ * Memory profile: ~LOOKAHEAD_FRAMES decoded VideoFrames + a few hundred
+ * encoded chunks waiting for the decoder. Total a few tens of MB regardless
+ * of source duration.
  */
 import type { DemuxedChunk, DemuxedTrack } from "./mp4Demuxer";
 
 export interface PlayerCallbacks {
   onTime?: (sec: number) => void;
-  onState?: (state: "idle" | "loading" | "ready" | "playing" | "paused" | "ended" | "error") => void;
+  onState?: (state: PlayerState) => void;
   onError?: (err: Error) => void;
   onConfigured?: (config: { codec: string; hardwareAcceleration: string }) => void;
 }
 
-/** Frames decoded ahead of the playhead; trade-off between latency and smoothness. */
-const TARGET_BUFFER = 30;
+export type PlayerState = "idle" | "loading" | "ready" | "playing" | "paused" | "ended" | "error";
+
+const LOOKAHEAD_FRAMES = 30;
+const PENDING_CHUNK_CAP = 600; // ~20 s at 30 fps; backpressure for the demuxer
 
 export class WebCodecsPlayer {
   private decoder: VideoDecoder | null = null;
   private track: DemuxedTrack | null = null;
-  private chunks: DemuxedChunk[] = [];
-  private nextChunkIdx = 0;
+  /** Encoded chunks waiting to be fed to the decoder. */
+  private pending: DemuxedChunk[] = [];
+  /** Decoded frames waiting to be rendered. */
   private frameQueue: VideoFrame[] = [];
+  private streamComplete = false;
   private playing = false;
   private rafId: number | null = null;
   private playStartWallTime = 0;
   private playStartMediaSec = 0;
   private currentSec = 0;
   private hardwareAcceleration = "unknown";
+  /** Set after configure() succeeds. */
+  private configured = false;
 
   constructor(
     private canvas: HTMLCanvasElement,
     private cbs: PlayerCallbacks = {},
   ) {}
 
-  async load(track: DemuxedTrack, chunks: DemuxedChunk[]) {
-    this.cbs.onState?.("loading");
+  async configure(track: DemuxedTrack) {
     this.dispose();
     this.track = track;
-    this.chunks = chunks;
     this.canvas.width = track.width;
     this.canvas.height = track.height;
 
     this.decoder = new VideoDecoder({
       output: (frame) => this.onDecodedFrame(frame),
       error: (e) => {
+        console.error("[player] decoder error", e);
         this.cbs.onError?.(e);
         this.cbs.onState?.("error");
       },
     });
 
-    // Probe what the browser is willing to give us, prefer hardware.
     const support = await VideoDecoder.isConfigSupported({
       codec: track.codec,
       codedWidth: track.width,
@@ -76,24 +81,38 @@ export class WebCodecsPlayer {
       description: track.description,
       hardwareAcceleration: "prefer-hardware",
     });
+    this.configured = true;
+    this.cbs.onConfigured?.({ codec: track.codec, hardwareAcceleration: this.hardwareAcceleration });
+    this.cbs.onState?.("loading");
+  }
 
-    this.cbs.onConfigured?.({
-      codec: track.codec,
-      hardwareAcceleration: this.hardwareAcceleration,
-    });
-
-    // Pre-decode a few frames so play() starts smooth.
+  /**
+   * Push a batch of encoded chunks delivered by the demuxer. Returns true if
+   * the player wants more right now, false if the consumer should pause —
+   * implements backpressure when the decoder/buffer can't keep up.
+   */
+  pushChunks(chunks: DemuxedChunk[]): boolean {
+    this.pending.push(...chunks);
     this.pumpDecoder();
-    this.cbs.onState?.("ready");
+    if (this.pending.length === 0 && this.frameQueue.length > 0 && !this.playing) {
+      // First frames available; surface them.
+      this.cbs.onState?.("ready");
+    }
+    return this.pending.length < PENDING_CHUNK_CAP;
+  }
+
+  /** Demuxer signals end-of-stream. */
+  markComplete() {
+    this.streamComplete = true;
   }
 
   private pumpDecoder() {
     if (!this.decoder || this.decoder.state !== "configured") return;
     while (
-      this.frameQueue.length + this.decoder.decodeQueueSize < TARGET_BUFFER &&
-      this.nextChunkIdx < this.chunks.length
+      this.pending.length > 0 &&
+      this.frameQueue.length + this.decoder.decodeQueueSize < LOOKAHEAD_FRAMES
     ) {
-      const c = this.chunks[this.nextChunkIdx++];
+      const c = this.pending.shift()!;
       this.decoder.decode(
         new EncodedVideoChunk({
           type: c.type,
@@ -107,9 +126,10 @@ export class WebCodecsPlayer {
 
   private onDecodedFrame(frame: VideoFrame) {
     this.frameQueue.push(frame);
-    // If we're paused at t=0 (just loaded), draw the first frame so the canvas isn't blank.
     if (!this.playing && this.frameQueue.length === 1) {
+      // Show the first decoded frame so the canvas isn't blank while paused.
       this.drawFrame(this.frameQueue[0], false);
+      this.cbs.onState?.("ready");
     }
   }
 
@@ -121,7 +141,7 @@ export class WebCodecsPlayer {
   }
 
   play() {
-    if (!this.track || this.playing) return;
+    if (!this.track || this.playing || !this.configured) return;
     this.playing = true;
     this.playStartWallTime = performance.now() / 1000;
     this.playStartMediaSec = this.currentSec;
@@ -131,7 +151,6 @@ export class WebCodecsPlayer {
       const elapsed = performance.now() / 1000 - this.playStartWallTime;
       const targetMediaSec = this.playStartMediaSec + elapsed;
       this.currentSec = targetMediaSec;
-      // Drop frames whose timestamp is well behind the target; render the closest one.
       let chosen: VideoFrame | null = null;
       while (this.frameQueue.length > 0) {
         const head = this.frameQueue[0];
@@ -145,7 +164,8 @@ export class WebCodecsPlayer {
       this.cbs.onTime?.(this.currentSec);
       this.pumpDecoder();
       if (
-        this.nextChunkIdx >= this.chunks.length &&
+        this.streamComplete &&
+        this.pending.length === 0 &&
         this.frameQueue.length === 0 &&
         this.decoder?.decodeQueueSize === 0
       ) {
@@ -167,28 +187,12 @@ export class WebCodecsPlayer {
   }
 
   /**
-   * Coarse seek: drops everything in flight, finds the keyframe at or before
-   * the target, and re-decodes from there. Frame-accurate scrub will land in
-   * the next iteration.
+   * Streaming demuxer doesn't preserve random access; this seek only works
+   * within the currently-buffered range. Seeking back/forward beyond the
+   * buffer needs the random-access demuxer (next iteration).
    */
   seek(sec: number) {
-    if (!this.track || this.chunks.length === 0) return;
-    this.pause();
-    for (const f of this.frameQueue) f.close();
-    this.frameQueue = [];
-    this.decoder?.flush().catch(() => undefined);
-
-    const targetUs = sec * 1_000_000;
-    let keyIdx = 0;
-    for (let i = this.chunks.length - 1; i >= 0; i--) {
-      if (this.chunks[i].type === "key" && this.chunks[i].timestamp <= targetUs) {
-        keyIdx = i;
-        break;
-      }
-    }
-    this.nextChunkIdx = keyIdx;
     this.currentSec = sec;
-    this.pumpDecoder();
     this.cbs.onTime?.(this.currentSec);
   }
 
@@ -196,9 +200,11 @@ export class WebCodecsPlayer {
     this.pause();
     for (const f of this.frameQueue) f.close();
     this.frameQueue = [];
+    this.pending = [];
+    this.streamComplete = false;
     if (this.decoder && this.decoder.state !== "closed") this.decoder.close();
     this.decoder = null;
-    this.nextChunkIdx = 0;
+    this.configured = false;
     this.currentSec = 0;
   }
 

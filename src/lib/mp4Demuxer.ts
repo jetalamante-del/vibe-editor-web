@@ -1,15 +1,26 @@
 /**
- * Thin wrapper around mp4box.js for parsing MP4/MOV containers and extracting
- * encoded video chunks suitable for WebCodecs VideoDecoder.
+ * Streaming MP4/MOV demuxer with constant memory usage.
  *
- * Why we need this: a `<video>` element handles container parsing internally
- * but doesn't expose the encoded samples. WebCodecs VideoDecoder works on
- * encoded chunks directly, so we have to demux the container ourselves to
- * pull (and order) the access units before feeding them to the decoder.
+ * Sony 4K captures put the moov box at the end of the file and routinely run
+ * past 8 GB. The naive `mp4box.appendBuffer(file.arrayBuffer())` loads the
+ * whole file into the heap; even chunked sequential streaming forces mp4box
+ * to accumulate every byte until it sees the moov.
+ *
+ * This demuxer:
+ *   1. Walks the file's top-level boxes via {@link findTopLevelBoxes} —
+ *      header-only reads, O(N_boxes), works on multi-GB files.
+ *   2. Feeds ftyp + moov to mp4box first so it can build the sample table
+ *      regardless of where moov physically lives.
+ *   3. Streams mdat to mp4box in 32 MB slices, calling
+ *      `releaseUsedSamples` after each onSamples emit so mp4box discards
+ *      bytes it has already handed off.
+ *   4. Emits sample batches via the `onSamples` callback so the consumer
+ *      can decode-and-drop instead of keeping every encoded chunk in JS.
+ *
+ * Total memory peak: ~32 MB scratch + the consumer's lookahead buffer.
  */
-// mp4box exposes named exports — `createFile` to create the parser and
-// `DataStream` for serializing avcC/hvcC boxes back into bytes.
 import { createFile, DataStream } from "mp4box";
+import { findTopLevelBoxes } from "./mp4BoxScanner";
 
 export interface DemuxedTrack {
   codec: string;
@@ -24,54 +35,89 @@ export interface DemuxedTrack {
 
 export interface DemuxedChunk {
   type: "key" | "delta";
-  timestamp: number; // microseconds
-  duration: number; // microseconds
+  /** Composition timestamp, microseconds. */
+  timestamp: number;
+  /** Sample duration, microseconds. */
+  duration: number;
   data: Uint8Array;
 }
 
-export interface DemuxResult {
-  track: DemuxedTrack;
-  chunks: DemuxedChunk[];
+export interface StreamingCallbacks {
+  /** Fires once after the moov is parsed and the codec info is known. */
+  onTrack(track: DemuxedTrack): void;
+  /** Fires every time mp4box hands off a batch of decoded samples. */
+  onSamples(chunks: DemuxedChunk[]): void;
+  /** 0..1 progress through the source file. */
+  onProgress?(loaded: number, total: number): void;
+  /** All samples have been emitted. */
+  onComplete(): void;
+  /** Demux failed. */
+  onError(err: Error): void;
 }
 
-/** Build a WebCodecs-compatible avcC/hvcC description from a track. */
-function extractDescription(track: any): Uint8Array | undefined {
-  for (const entry of track.mdia?.minf?.stbl?.stsd?.entries ?? []) {
+/** Build a WebCodecs-compatible avcC/hvcC description from a parsed trak. */
+function extractDescription(trak: any): Uint8Array | undefined {
+  for (const entry of trak?.mdia?.minf?.stbl?.stsd?.entries ?? []) {
     const box = entry.avcC || entry.hvcC || entry.vpcC || entry.av1C;
     if (box) {
       const stream = new DataStream(undefined, 0, DataStream.BIG_ENDIAN);
       box.write(stream);
-      return new Uint8Array(stream.buffer, 8); // skip the 8-byte box header
+      return new Uint8Array(stream.buffer, 8); // skip 8-byte box header
     }
   }
   return undefined;
 }
 
-const CHUNK_SIZE = 16 * 1024 * 1024; // 16 MB
+/** Turn an mp4box Sample into our wire-friendly DemuxedChunk. */
+function toChunk(s: any): DemuxedChunk {
+  return {
+    type: s.is_sync ? "key" : "delta",
+    timestamp: (s.cts * 1_000_000) / s.timescale,
+    duration: (s.duration * 1_000_000) / s.timescale,
+    data: s.data,
+  };
+}
 
-/**
- * Demux an MP4 file into encoded chunks for the first video track.
- *
- * Streams the file in 16 MB slices instead of `file.arrayBuffer()`, so a
- * multi-GB source doesn't blow up the heap. mp4box parses incrementally;
- * `onReady` fires as soon as the moov is available, and `onSamples` arrives
- * in batches as more bytes are appended.
- */
-export async function demuxMp4(file: File, onProgress?: (loaded: number, total: number) => void): Promise<DemuxResult> {
-  return new Promise<DemuxResult>((resolve, reject) => {
-    const mp4box = createFile();
-    let videoTrack: any = null;
-    const chunks: DemuxedChunk[] = [];
-    let expectedSamples = 0;
-    let resolved = false;
+const MDAT_CHUNK = 32 * 1024 * 1024; // 32 MB
 
-    const tryFinish = () => {
-      if (resolved) return;
-      if (videoTrack && chunks.length >= expectedSamples) {
-        resolved = true;
+export interface DemuxHandle {
+  /** Cancel the streaming demux. Idempotent. */
+  abort(): void;
+}
+
+export function demuxMp4Streaming(file: File, cbs: StreamingCallbacks): DemuxHandle {
+  let aborted = false;
+
+  (async () => {
+    try {
+      const boxes = await findTopLevelBoxes(file);
+      const ftyp = boxes.find((b) => b.type === "ftyp");
+      const moov = boxes.find((b) => b.type === "moov");
+      const mdats = boxes.filter((b) => b.type === "mdat");
+      if (!moov) throw new Error("MP4 has no moov box (incomplete or non-MP4 file)");
+      if (mdats.length === 0) throw new Error("MP4 has no mdat box (no media data)");
+
+      const mp4box = createFile();
+      let videoTrack: any = null;
+      let videoTrackId = -1;
+      let lastEmittedSampleNumber = 0;
+
+      mp4box.onError = (e: string) => {
+        if (!aborted) cbs.onError(new Error(`mp4box: ${e}`));
+      };
+
+      mp4box.onReady = (info: any) => {
+        videoTrack = info.videoTracks?.[0];
+        if (!videoTrack) {
+          cbs.onError(new Error("No video track in file"));
+          aborted = true;
+          return;
+        }
+        videoTrackId = videoTrack.id;
+        const trak = mp4box.getTrackById(videoTrackId);
         const track: DemuxedTrack = {
           codec: videoTrack.codec,
-          description: extractDescription(mp4box.getTrackById(videoTrack.id)),
+          description: extractDescription(trak),
           width: videoTrack.video.width,
           height: videoTrack.video.height,
           durationSec: videoTrack.duration / videoTrack.timescale,
@@ -79,63 +125,71 @@ export async function demuxMp4(file: File, onProgress?: (loaded: number, total: 
           nbSamples: videoTrack.nb_samples,
           fps: videoTrack.nb_samples / (videoTrack.duration / videoTrack.timescale || 1),
         };
-        chunks.sort((a, b) => a.timestamp - b.timestamp);
-        resolve({ track, chunks });
+        cbs.onTrack(track);
+        mp4box.setExtractionOptions(videoTrackId, null, { nbSamples: 200 });
+        mp4box.start();
+      };
+
+      mp4box.onSamples = (_id: number, _user: unknown, samples: any[]) => {
+        if (aborted || samples.length === 0) return;
+        cbs.onSamples(samples.map(toChunk));
+        // Tell mp4box we're done with these so it can drop the underlying bytes.
+        const lastNum = samples[samples.length - 1].number;
+        if (lastNum > lastEmittedSampleNumber) {
+          lastEmittedSampleNumber = lastNum;
+          mp4box.releaseUsedSamples(videoTrackId, lastNum);
+        }
+      };
+
+      // 1) Feed ftyp (small, beginning) so mp4box knows what file it's looking at.
+      if (ftyp) {
+        const ab = (await file.slice(ftyp.start, ftyp.start + ftyp.size).arrayBuffer()) as ArrayBuffer & {
+          fileStart?: number;
+        };
+        ab.fileStart = ftyp.start;
+        mp4box.appendBuffer(ab);
+        if (aborted) return;
       }
-    };
 
-    mp4box.onError = (e: string) => {
-      if (!resolved) reject(new Error(`mp4box: ${e}`));
-    };
+      // 2) Feed moov in one go — onReady fires here.
+      const moovAb = (await file.slice(moov.start, moov.start + moov.size).arrayBuffer()) as ArrayBuffer & {
+        fileStart?: number;
+      };
+      moovAb.fileStart = moov.start;
+      mp4box.appendBuffer(moovAb);
+      if (aborted) return;
 
-    mp4box.onReady = (info: any) => {
-      videoTrack = info.videoTracks?.[0];
-      if (!videoTrack) {
-        reject(new Error("No video track in file"));
-        return;
-      }
-      expectedSamples = videoTrack.nb_samples;
-      mp4box.setExtractionOptions(videoTrack.id, null, { nbSamples: 1000 });
-      mp4box.start();
-    };
-
-    mp4box.onSamples = (_id: number, _user: unknown, samples: any[]) => {
-      for (const s of samples) {
-        chunks.push({
-          type: s.is_sync ? "key" : "delta",
-          timestamp: (s.cts * 1_000_000) / s.timescale,
-          duration: (s.duration * 1_000_000) / s.timescale,
-          data: s.data,
-        });
-      }
-      tryFinish();
-    };
-
-    // Stream the file in slices. Each appendBuffer can synchronously fire
-    // onReady/onSamples, so progress is reported between slices.
-    (async () => {
-      try {
-        let offset = 0;
-        while (offset < file.size && !resolved) {
-          const slice = file.slice(offset, Math.min(offset + CHUNK_SIZE, file.size));
-          const ab = (await slice.arrayBuffer()) as ArrayBuffer & { fileStart?: number };
-          ab.fileStart = offset;
+      // 3) Stream every mdat in 32 MB slices. mp4box parses samples in
+      //    these ranges and fires onSamples. releaseUsedSamples lets it drop
+      //    the bytes between iterations.
+      const totalMdat = mdats.reduce((acc, m) => acc + m.size, 0);
+      let mdatLoaded = 0;
+      for (const mdat of mdats) {
+        let pos = mdat.start;
+        const end = mdat.start + mdat.size;
+        while (pos < end) {
+          if (aborted) return;
+          const next = Math.min(pos + MDAT_CHUNK, end);
+          const ab = (await file.slice(pos, next).arrayBuffer()) as ArrayBuffer & { fileStart?: number };
+          ab.fileStart = pos;
           mp4box.appendBuffer(ab);
-          offset += ab.byteLength;
-          onProgress?.(offset, file.size);
-          // Yield so React can paint progress between large slices.
+          mdatLoaded += ab.byteLength;
+          pos = next;
+          cbs.onProgress?.(mdatLoaded, totalMdat);
+          // Yield so React can paint and the decoder can consume.
           await new Promise<void>((r) => setTimeout(r, 0));
         }
-        if (!resolved) {
-          mp4box.flush();
-          tryFinish();
-          if (!resolved) {
-            reject(new Error(`Demux finished but only got ${chunks.length}/${expectedSamples} samples`));
-          }
-        }
-      } catch (e) {
-        reject(e);
       }
-    })();
-  });
+      mp4box.flush();
+      if (!aborted) cbs.onComplete();
+    } catch (e: any) {
+      if (!aborted) cbs.onError(e instanceof Error ? e : new Error(String(e)));
+    }
+  })();
+
+  return {
+    abort() {
+      aborted = true;
+    },
+  };
 }

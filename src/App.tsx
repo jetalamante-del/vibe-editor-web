@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Music, Pause, Play, Upload } from "lucide-react";
-import { demuxMp4 } from "./lib/mp4Demuxer";
+import { demuxMp4Streaming } from "./lib/mp4Demuxer";
 import { WebCodecsPlayer } from "./lib/webcodecsPlayer";
 import { AudioPlayer } from "./lib/audioPlayer";
 
@@ -77,20 +77,6 @@ export default function App() {
     const audioFile = sorted.find((x) => x.kind === "audio")?.f;
     console.log("[vibe] routing:", { video: videoFile?.name, audio: audioFile?.name });
 
-    // mp4box accumulates the whole file in memory until it finds the moov box.
-    // Sony cameras put moov at the END, so an 8 GB capture forces ~8 GB of
-    // browser heap before even one frame can be emitted. Until we replace
-    // mp4box with a random-access demuxer, refuse files past a sane limit.
-    const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
-    if (videoFile && videoFile.size > MAX_VIDEO_BYTES) {
-      const gb = (videoFile.size / 1024 / 1024 / 1024).toFixed(1);
-      setError(
-        `Video file is ${gb} GB. The current demuxer can't stream files larger than 2 GB without a custom random-access reader (coming next). Drop a smaller file, or use the 1080p H.264 proxy at ~/Desktop/C0126_proxy_1080p.mp4 (already generated for you).`,
-      );
-      setState("idle");
-      setInfo(null);
-      return;
-    }
 
     setError(null);
     setInfo(null);
@@ -132,38 +118,62 @@ export default function App() {
         setError(msg);
         return;
       }
-      setState("demuxing 0%");
-      console.log("[vibe] starting demuxMp4 for", videoFile.name, "size:", videoFile.size);
-      try {
-        const { track, chunks } = await demuxMp4(videoFile, (loaded, total) => {
+      setState("scanning 0%");
+      const sizeGb = (videoFile.size / 1024 / 1024 / 1024).toFixed(2);
+      console.log(`[vibe] streaming demux of ${videoFile.name} (${sizeGb} GB)`);
+
+      const player = new WebCodecsPlayer(canvasRef.current, {
+        onState: driver === "video" ? setState : undefined,
+        onTime: driver === "video" ? setTime : undefined,
+        onError: (e) => setError(e.message),
+        onConfigured: ({ codec, hardwareAcceleration }) => {
+          console.log("[vibe] decoder configured:", codec, hardwareAcceleration);
+        },
+      });
+      videoPlayerRef.current = player;
+
+      demuxMp4Streaming(videoFile, {
+        onTrack: async (track) => {
+          console.log("[vibe] track:", track.codec, `${track.width}×${track.height}`, `${track.fps.toFixed(2)}fps`);
+          setInfo((prev) => ({
+            ...((prev ?? {}) as object),
+            kind: "video",
+            name: videoFile.name,
+            codec: track.codec,
+            width: track.width,
+            height: track.height,
+            durationSec: track.durationSec,
+            fps: track.fps,
+            hardware: "configuring…",
+            audioFileName: audioFile?.name,
+          }) as VideoFileInfo);
+          try {
+            await player.configure(track);
+            setInfo((prev) =>
+              prev?.kind === "video" ? { ...prev, hardware: player.hardware } : prev,
+            );
+          } catch (e: any) {
+            setError(e.message ?? String(e));
+            setState("error");
+          }
+        },
+        onSamples: (chunks) => {
+          player.pushChunks(chunks);
+        },
+        onProgress: (loaded, total) => {
           const pct = Math.floor((loaded / total) * 100);
-          setState(`demuxing ${pct}%`);
-        });
-        console.log("[vibe] demuxed", { codec: track.codec, chunks: chunks.length, width: track.width, height: track.height, durationSec: track.durationSec });
-        const player = new WebCodecsPlayer(canvasRef.current, {
-          onState: driver === "video" ? setState : undefined,
-          onTime: driver === "video" ? setTime : undefined,
-          onError: (e) => setError(e.message),
-          onConfigured: ({ codec, hardwareAcceleration }) =>
-            setInfo((prev) => ({
-              ...((prev ?? {}) as object),
-              kind: "video",
-              name: videoFile.name,
-              codec,
-              width: track.width,
-              height: track.height,
-              durationSec: track.durationSec,
-              fps: track.fps,
-              hardware: hardwareAcceleration,
-              audioFileName: audioFile?.name,
-            }) as VideoFileInfo),
-        });
-        videoPlayerRef.current = player;
-        await player.load(track, chunks);
-      } catch (e: any) {
-        setError(e.message ?? String(e));
-        setState("error");
-      }
+          setState((s) => (s.startsWith("scanning") || s.startsWith("loading") ? `loading ${pct}%` : s));
+        },
+        onComplete: () => {
+          console.log("[vibe] streaming demux complete");
+          player.markComplete();
+        },
+        onError: (e) => {
+          console.error("[vibe] demux error", e);
+          setError(e.message);
+          setState("error");
+        },
+      });
     }
 
     if (audioFile) {
