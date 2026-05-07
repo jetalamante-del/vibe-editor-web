@@ -62,15 +62,20 @@ export default function App() {
   );
 
   const handleFiles = async (files: File[]) => {
+    console.log("[vibe] handleFiles called with", files.length, "files:", files.map((f) => `${f.name} (${f.type || "no-type"}, ${f.size}B)`));
     const sorted = files
       .map((f) => ({ f, kind: detectKind(f) }))
       .filter((x): x is { f: File; kind: MediaKind } => x.kind !== null);
+    console.log("[vibe] detected kinds:", sorted.map((s) => `${s.f.name} -> ${s.kind}`));
     if (sorted.length === 0) {
-      setError(`Unsupported file type${files.length > 1 ? "s" : ""}: ${files.map((f) => f.name).join(", ")}`);
+      const msg = `Unsupported file type${files.length > 1 ? "s" : ""}: ${files.map((f) => `${f.name} (${f.type || "?"})`).join(", ")}`;
+      console.error("[vibe]", msg);
+      setError(msg);
       return;
     }
     const videoFile = sorted.find((x) => x.kind === "video")?.f;
     const audioFile = sorted.find((x) => x.kind === "audio")?.f;
+    console.log("[vibe] routing:", { video: videoFile?.name, audio: audioFile?.name });
 
     setError(null);
     setInfo(null);
@@ -80,15 +85,43 @@ export default function App() {
     videoPlayerRef.current = null;
     audioPlayerRef.current = null;
 
+    // Mount the player UI immediately with a placeholder so the canvas/audio
+    // shells render synchronously. Without this, canvasRef.current is still
+    // null when WebCodecsPlayer tries to read it, and the load fails silently.
+    if (videoFile) {
+      setInfo({
+        kind: "video",
+        name: videoFile.name,
+        codec: "—",
+        width: 1920,
+        height: 1080,
+        durationSec: 0,
+        fps: 0,
+        hardware: "—",
+        audioFileName: audioFile?.name,
+      });
+    } else if (audioFile) {
+      setInfo({ kind: "audio", name: audioFile.name, durationSec: 0, sampleRate: 0, channels: 0 });
+    }
+    // Wait one paint so refs settle.
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+
     // Time updates only come from the video clock when both are present
     // (otherwise audio drives). State follows whichever drives.
     const driver: "video" | "audio" = videoFile ? "video" : "audio";
 
     if (videoFile) {
-      if (!canvasRef.current) return;
+      if (!canvasRef.current) {
+        const msg = "Internal: canvas ref not attached after rAF wait";
+        console.error("[vibe]", msg);
+        setError(msg);
+        return;
+      }
       setState("demuxing");
+      console.log("[vibe] starting demuxMp4 for", videoFile.name);
       try {
         const { track, chunks } = await demuxMp4(videoFile);
+        console.log("[vibe] demuxed", { codec: track.codec, chunks: chunks.length, width: track.width, height: track.height, durationSec: track.durationSec });
         const player = new WebCodecsPlayer(canvasRef.current, {
           onState: driver === "video" ? setState : undefined,
           onTime: driver === "video" ? setTime : undefined,
