@@ -21,6 +21,7 @@
  */
 import { createFile, DataStream } from "mp4box";
 import { findTopLevelBoxes } from "./mp4BoxScanner";
+import { buildSampleTable, type Sample } from "./mp4SampleTable";
 
 export interface DemuxedTrack {
   codec: string;
@@ -43,8 +44,12 @@ export interface DemuxedChunk {
 }
 
 export interface StreamingCallbacks {
-  /** Fires once after the moov is parsed and the codec info is known. */
-  onTrack(track: DemuxedTrack): void;
+  /**
+   * Fires once after the moov is parsed and the codec info is known. The
+   * sample table is also built at this point so the consumer can do random
+   * access by slicing the source file directly.
+   */
+  onTrack(track: DemuxedTrack, samples: Sample[]): void;
   /** Fires every time mp4box hands off a batch of decoded samples. */
   onSamples(chunks: DemuxedChunk[]): void;
   /** 0..1 progress through the source file. */
@@ -124,6 +129,15 @@ export function demuxMp4Streaming(file: File, cbs: StreamingCallbacks): DemuxHan
           return;
         }
         console.log("[demux] selected video track:", videoTrack.codec, `${videoTrack.video?.width}×${videoTrack.video?.height}`, "samples:", videoTrack.nb_samples);
+        let sampleTable: Sample[] = [];
+        try {
+          sampleTable = buildSampleTable(mp4box.getTrackById(videoTrackId));
+          console.log(
+            `[demux] built sample table: ${sampleTable.length} samples, ${sampleTable.filter((s) => s.isSync).length} keyframes`,
+          );
+        } catch (e: any) {
+          console.warn("[demux] sample-table build failed; random-access seek will be disabled:", e?.message ?? e);
+        }
         videoTrackId = videoTrack.id;
         const trak = mp4box.getTrackById(videoTrackId);
         const track: DemuxedTrack = {
@@ -136,7 +150,7 @@ export function demuxMp4Streaming(file: File, cbs: StreamingCallbacks): DemuxHan
           nbSamples: videoTrack.nb_samples,
           fps: videoTrack.nb_samples / (videoTrack.duration / videoTrack.timescale || 1),
         };
-        cbs.onTrack(track);
+        cbs.onTrack(track, sampleTable);
         mp4box.setExtractionOptions(videoTrackId, null, { nbSamples: 200 });
         mp4box.start();
       };

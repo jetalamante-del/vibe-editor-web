@@ -1,32 +1,122 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Film, Music } from "lucide-react";
 import { projectDuration, useProjectStore, type Clip, type Track } from "../store/projectStore";
 
-const PIXELS_PER_SECOND = 40;
+const BASE_PIXELS_PER_SECOND = 40;
+
+interface DragState {
+  clipId: string;
+  pointerStartX: number;
+  startTimeAtPointerDown: number;
+}
+
+interface ContextMenu {
+  x: number;
+  y: number;
+  clipId: string;
+}
 
 export function Timeline() {
   const tracks = useProjectStore((s) => s.tracks);
   const clips = useProjectStore((s) => s.clips);
   const assets = useProjectStore((s) => s.assets);
   const currentTime = useProjectStore((s) => s.currentTime);
-  const selectedClipId = useProjectStore((s) => s.selectedClipId);
+  const selectedClipIds = useProjectStore((s) => s.selectedClipIds);
   const selectClip = useProjectStore((s) => s.selectClip);
+  const moveClip = useProjectStore((s) => s.moveClip);
+  const syncSelected = useProjectStore((s) => s.syncSelectedClips);
+  const zoom = useProjectStore((s) => s.timelineZoom);
+  const setZoom = useProjectStore((s) => s.setTimelineZoom);
   const duration = useProjectStore(projectDuration);
-  const contentWidth = Math.max(800, Math.round((duration + 5) * PIXELS_PER_SECOND));
+
+  const pps = BASE_PIXELS_PER_SECOND * zoom;
+  const contentWidth = Math.max(800, Math.round((duration + 5) * pps));
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [drag, setDrag] = useState<DragState | null>(null);
+  const [menu, setMenu] = useState<ContextMenu | null>(null);
+
+  // Pinch-to-zoom + Cmd/Ctrl+wheel on the timeline. The trackpad pinch gesture
+  // arrives as a wheel event with ctrlKey set on macOS. Anchor the zoom to
+  // the cursor's time position so the moment under the pointer stays put.
+  const onWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const container = scrollRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const cursorX = e.clientX - rect.left;
+    const cursorXContent = cursorX + container.scrollLeft;
+    const timeAtCursor = cursorXContent / Math.max(1, pps);
+    const factor = Math.exp(-e.deltaY * 0.01);
+    const next = Math.max(0.25, Math.min(6, zoom * factor));
+    if (next === zoom) return;
+    setZoom(next);
+    requestAnimationFrame(() => {
+      if (!scrollRef.current) return;
+      const newPps = BASE_PIXELS_PER_SECOND * next;
+      scrollRef.current.scrollLeft = Math.max(0, timeAtCursor * newPps - cursorX);
+    });
+  };
+
+  // Global pointer-up + pointer-move for clip dragging. Listen at window
+  // level so the drag survives the cursor leaving the clip rectangle.
+  useEffect(() => {
+    if (!drag) return;
+    const onMove = (ev: PointerEvent) => {
+      const dx = ev.clientX - drag.pointerStartX;
+      const dt = dx / pps;
+      moveClip(drag.clipId, drag.startTimeAtPointerDown + dt);
+    };
+    const onUp = () => setDrag(null);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [drag, pps, moveClip]);
+
+  // Dismiss the right-click menu on any outside click / Escape.
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
 
   const ticks = useMemo(() => {
     const out: number[] = [];
     const total = duration + 5;
-    const step = total > 60 ? 5 : 1;
+    const step = pps < 30 ? 10 : pps < 80 ? 5 : pps < 200 ? 1 : 0.5;
     for (let t = 0; t <= total; t += step) out.push(t);
     return out;
-  }, [duration]);
+  }, [duration, pps]);
 
   return (
     <section className="h-64 shrink-0 bg-surface-0 border-t border-border flex flex-col min-h-0">
       <div className="h-9 border-b border-border px-3 flex items-center gap-3 text-xs text-text-muted">
         <span className="font-medium text-text-primary">Timeline</span>
         <span>· {tracks.length} tracks · {clips.length} clips · {duration.toFixed(2)}s</span>
+        <div className="flex-1" />
+        <span className="text-[10px]">Cmd/Ctrl + scroll to zoom · {(zoom * 100).toFixed(0)}%</span>
+        <button
+          onClick={() => setZoom(Math.max(0.25, zoom / 1.25))}
+          className="px-1.5 py-0.5 rounded hover:bg-surface-2 text-text-muted"
+        >
+          –
+        </button>
+        <button
+          onClick={() => setZoom(Math.min(6, zoom * 1.25))}
+          className="px-1.5 py-0.5 rounded hover:bg-surface-2 text-text-muted"
+        >
+          +
+        </button>
       </div>
 
       <div className="flex-1 flex min-h-0">
@@ -37,7 +127,11 @@ export function Timeline() {
               key={t.id}
               className="h-14 border-b border-border/60 px-3 flex items-center gap-2 text-xs text-text-muted"
             >
-              {t.kind === "video" ? <Film className="w-3.5 h-3.5" /> : <Music className="w-3.5 h-3.5 text-accent" />}
+              {t.kind === "video" ? (
+                <Film className="w-3.5 h-3.5" />
+              ) : (
+                <Music className="w-3.5 h-3.5 text-accent" />
+              )}
               <span className="truncate">{t.name}</span>
             </div>
           ))}
@@ -46,17 +140,21 @@ export function Timeline() {
           )}
         </div>
 
-        <div className="flex-1 overflow-x-auto overflow-y-hidden relative">
+        <div
+          ref={scrollRef}
+          onWheel={onWheel}
+          className="flex-1 overflow-x-auto overflow-y-hidden relative"
+        >
           <div style={{ width: contentWidth, position: "relative" }}>
             <div className="h-7 border-b border-border relative">
               {ticks.map((t) => (
                 <div
                   key={t}
                   className="absolute top-0 bottom-0 border-l border-border/40"
-                  style={{ left: t * PIXELS_PER_SECOND }}
+                  style={{ left: t * pps }}
                 >
                   <span className="text-[10px] text-text-muted ml-1 font-mono">
-                    {Math.floor(t / 60)}:{String(t % 60).padStart(2, "0")}
+                    {Math.floor(t / 60)}:{String(Math.floor(t % 60)).padStart(2, "0")}
                   </span>
                 </div>
               ))}
@@ -67,59 +165,131 @@ export function Timeline() {
                 key={t.id}
                 track={t}
                 clips={clips.filter((c) => c.trackId === t.id)}
-                onSelect={selectClip}
-                selectedId={selectedClipId}
+                pps={pps}
+                selectedIds={selectedClipIds}
+                onClipPointerDown={(clipId, ev) => {
+                  selectClip(clipId, ev.shiftKey || ev.metaKey);
+                  setDrag({
+                    clipId,
+                    pointerStartX: ev.clientX,
+                    startTimeAtPointerDown: clips.find((c) => c.id === clipId)?.startTime ?? 0,
+                  });
+                }}
+                onClipContextMenu={(clipId, ev) => {
+                  if (!selectedClipIds.includes(clipId)) selectClip(clipId, false);
+                  setMenu({ x: ev.clientX, y: ev.clientY, clipId });
+                }}
                 getAssetName={(id) => assets.find((a) => a.id === id)?.name ?? "Clip"}
               />
             ))}
 
             <div
               className="absolute top-0 bottom-0 w-px bg-accent z-20 pointer-events-none"
-              style={{ left: currentTime * PIXELS_PER_SECOND }}
+              style={{ left: currentTime * pps }}
             >
               <div className="w-2 h-2 -ml-[3px] bg-accent rounded-sm" />
             </div>
           </div>
         </div>
       </div>
+
+      {menu && (
+        <div
+          className="fixed z-50 bg-surface-1 border border-border rounded-md shadow-xl py-1 text-sm min-w-[200px]"
+          style={{ left: menu.x, top: menu.y }}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <MenuItem
+            disabled={selectedClipIds.length < 2}
+            onClick={() => {
+              syncSelected();
+              setMenu(null);
+            }}
+          >
+            Sync selected clips
+            {selectedClipIds.length < 2 && (
+              <span className="ml-auto text-[10px] text-text-muted">select 2+</span>
+            )}
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              moveClip(menu.clipId, 0);
+              setMenu(null);
+            }}
+          >
+            Move to start
+          </MenuItem>
+        </div>
+      )}
     </section>
+  );
+}
+
+function MenuItem({
+  children,
+  onClick,
+  disabled,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!disabled) onClick();
+      }}
+      disabled={disabled}
+      className="w-full text-left px-3 py-1.5 hover:bg-surface-2 disabled:opacity-40 disabled:hover:bg-transparent flex items-center gap-2"
+    >
+      {children}
+    </button>
   );
 }
 
 function TrackRow({
   track,
   clips,
-  onSelect,
-  selectedId,
+  pps,
+  selectedIds,
+  onClipPointerDown,
+  onClipContextMenu,
   getAssetName,
 }: {
   track: Track;
   clips: Clip[];
-  onSelect: (id: string | null) => void;
-  selectedId: string | null;
+  pps: number;
+  selectedIds: string[];
+  onClipPointerDown: (clipId: string, ev: React.PointerEvent) => void;
+  onClipContextMenu: (clipId: string, ev: React.MouseEvent) => void;
   getAssetName: (id: string) => string;
 }) {
   return (
     <div className="h-14 border-b border-border/60 relative">
       {clips.map((c) => {
-        const left = c.startTime * PIXELS_PER_SECOND;
-        const width = Math.max(20, c.duration * PIXELS_PER_SECOND);
-        const selected = c.id === selectedId;
+        const left = c.startTime * pps;
+        const width = Math.max(20, c.duration * pps);
+        const selected = selectedIds.includes(c.id);
         const isVideo = track.kind === "video";
         return (
-          <button
+          <div
             key={c.id}
-            onClick={() => onSelect(c.id)}
-            className={`absolute top-1.5 bottom-1.5 rounded text-[11px] text-left px-2 truncate transition-colors ${
+            onPointerDown={(e) => onClipPointerDown(c.id, e)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              onClipContextMenu(c.id, e);
+            }}
+            className={`absolute top-1.5 bottom-1.5 rounded text-[11px] text-left px-2 truncate cursor-grab select-none transition-colors ${
               isVideo
                 ? "bg-cyan-900/60 border border-cyan-700/60 hover:bg-cyan-900/80"
                 : "bg-emerald-900/60 border border-emerald-700/60 hover:bg-emerald-900/80"
             } ${selected ? "ring-2 ring-accent" : ""}`}
             style={{ left, width }}
-            title={getAssetName(c.assetId)}
+            title={`${getAssetName(c.assetId)} — right-click for options`}
           >
             {getAssetName(c.assetId)}
-          </button>
+          </div>
         );
       })}
     </div>

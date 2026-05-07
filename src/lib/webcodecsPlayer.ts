@@ -12,6 +12,7 @@
  * of source duration.
  */
 import type { DemuxedChunk, DemuxedTrack } from "./mp4Demuxer";
+import { findSyncSampleAtOrBefore, type Sample } from "./mp4SampleTable";
 
 export interface PlayerCallbacks {
   onTime?: (sec: number) => void;
@@ -41,11 +42,26 @@ export class WebCodecsPlayer {
   private hardwareAcceleration = "unknown";
   /** Set after configure() succeeds. */
   private configured = false;
+  /** Random-access source — set when the demuxer hands us a sample table. */
+  private sourceFile: File | null = null;
+  private sampleTable: Sample[] = [];
+  /** Index of the next sample we'd serve for sequential playback after seek. */
+  private seekFeedIdx = -1;
+  /** Microsecond target for the most recent seek, used to skip-decode. */
+  private seekTargetUs = -1;
+  /** Generation counter so stale frames decoded before the latest seek are dropped. */
+  private decodeGeneration = 0;
 
   constructor(
     private canvas: HTMLCanvasElement,
     private cbs: PlayerCallbacks = {},
   ) {}
+
+  /** Tell the player which file + sample table to use for random-access seeks. */
+  attachRandomAccess(file: File, samples: Sample[]) {
+    this.sourceFile = file;
+    this.sampleTable = samples;
+  }
 
   async configure(track: DemuxedTrack) {
     this.dispose();
@@ -125,9 +141,23 @@ export class WebCodecsPlayer {
   }
 
   private onDecodedFrame(frame: VideoFrame) {
+    // After a seek, frames whose cts is before the seek target are decoded
+    // only to satisfy reference dependencies — drop them silently.
+    if (this.seekTargetUs >= 0) {
+      const cts = frame.timestamp ?? 0;
+      if (cts + 1000 < this.seekTargetUs) {
+        frame.close();
+        return;
+      }
+      // First frame at or after the target — render it and clear the marker.
+      this.seekTargetUs = -1;
+      this.drawFrame(frame, false);
+      this.frameQueue.push(frame);
+      this.cbs.onState?.("ready");
+      return;
+    }
     this.frameQueue.push(frame);
     if (!this.playing && this.frameQueue.length === 1) {
-      // Show the first decoded frame so the canvas isn't blank while paused.
       this.drawFrame(this.frameQueue[0], false);
       this.cbs.onState?.("ready");
     }
@@ -162,7 +192,15 @@ export class WebCodecsPlayer {
       }
       if (chosen) this.drawFrame(chosen, true);
       this.cbs.onTime?.(this.currentSec);
-      this.pumpDecoder();
+      // After a random-access seek we drive the decoder ourselves from the
+      // sample table — fetch more samples ahead of the playhead.
+      if (this.seekFeedIdx >= 0 && this.seekFeedIdx < this.sampleTable.length) {
+        if (this.frameQueue.length + (this.decoder?.decodeQueueSize ?? 0) < LOOKAHEAD_FRAMES) {
+          void this.feedNextRange(LOOKAHEAD_FRAMES);
+        }
+      } else {
+        this.pumpDecoder();
+      }
       if (
         this.streamComplete &&
         this.pending.length === 0 &&
@@ -187,13 +225,97 @@ export class WebCodecsPlayer {
   }
 
   /**
-   * Streaming demuxer doesn't preserve random access; this seek only works
-   * within the currently-buffered range. Seeking back/forward beyond the
-   * buffer needs the random-access demuxer (next iteration).
+   * Random-access seek. Locates the latest keyframe at or before `sec` in
+   * the sample table, slices the source file from that keyframe forward,
+   * and feeds the resulting EncodedVideoChunks to the decoder. Frames whose
+   * cts falls before the seek target are decoded but not displayed (they're
+   * needed to satisfy reference dependencies before the target frame).
+   *
+   * Falls back to setting currentTime if no sample table is attached
+   * (e.g. seek arrives before the moov has been parsed).
    */
-  seek(sec: number) {
+  async seek(sec: number) {
+    if (!this.sourceFile || this.sampleTable.length === 0 || !this.decoder) {
+      // No random-access yet — record the time so playback resumes there once
+      // streaming catches up. Slider still updates.
+      this.currentSec = Math.max(0, sec);
+      this.cbs.onTime?.(this.currentSec);
+      return;
+    }
+
+    const wasPlaying = this.playing;
+    this.pause();
+
+    const targetUs = Math.max(0, sec) * 1_000_000;
+    const keyIdx = findSyncSampleAtOrBefore(this.sampleTable, targetUs);
+    this.seekTargetUs = targetUs;
+    this.seekFeedIdx = keyIdx;
     this.currentSec = sec;
     this.cbs.onTime?.(this.currentSec);
+
+    // Drop in-flight frames + reset decoder so we don't render past content
+    // before the new keyframe lands.
+    for (const f of this.frameQueue) f.close();
+    this.frameQueue = [];
+    this.pending = [];
+    this.decodeGeneration++;
+    try {
+      await this.decoder.flush();
+    } catch {
+      /* flush after seek can throw; ignore */
+    }
+
+    // Pre-feed roughly LOOKAHEAD_FRAMES samples starting at the keyframe.
+    await this.feedNextRange(LOOKAHEAD_FRAMES);
+
+    if (wasPlaying) this.play();
+  }
+
+  /**
+   * Slice `count` samples from the source file starting at seekFeedIdx and
+   * push them through the decoder. Bytes are released as soon as the decode
+   * call accepts them (the underlying ArrayBuffer is owned by EncodedVideoChunk).
+   */
+  private async feedNextRange(count: number) {
+    if (!this.sourceFile || !this.decoder) return;
+    const start = this.seekFeedIdx;
+    const end = Math.min(start + count, this.sampleTable.length);
+    if (start < 0 || start >= this.sampleTable.length) return;
+
+    // Coalesce contiguous samples into a single file.slice call to amortize
+    // the cost of slicing — most consecutive samples are stored back-to-back.
+    let groupStart = start;
+    while (groupStart < end) {
+      let groupEnd = groupStart + 1;
+      while (
+        groupEnd < end &&
+        this.sampleTable[groupEnd].offset ===
+          this.sampleTable[groupEnd - 1].offset + this.sampleTable[groupEnd - 1].size
+      ) {
+        groupEnd++;
+      }
+      const fileStart = this.sampleTable[groupStart].offset;
+      const last = this.sampleTable[groupEnd - 1];
+      const fileEnd = last.offset + last.size;
+      const ab = await this.sourceFile.slice(fileStart, fileEnd).arrayBuffer();
+      let cursor = 0;
+      for (let i = groupStart; i < groupEnd; i++) {
+        const s = this.sampleTable[i];
+        const slice = new Uint8Array(ab, cursor, s.size);
+        cursor += s.size;
+        if (this.decoder.state !== "configured") return;
+        this.decoder.decode(
+          new EncodedVideoChunk({
+            type: s.isSync ? "key" : "delta",
+            timestamp: s.cts,
+            duration: s.duration,
+            data: slice,
+          }),
+        );
+      }
+      groupStart = groupEnd;
+    }
+    this.seekFeedIdx = end;
   }
 
   dispose() {
@@ -206,6 +328,10 @@ export class WebCodecsPlayer {
     this.decoder = null;
     this.configured = false;
     this.currentSec = 0;
+    this.sourceFile = null;
+    this.sampleTable = [];
+    this.seekFeedIdx = -1;
+    this.seekTargetUs = -1;
   }
 
   get duration(): number {

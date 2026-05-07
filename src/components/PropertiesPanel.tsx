@@ -2,7 +2,8 @@ import { Settings } from "lucide-react";
 import { useProjectStore } from "../store/projectStore";
 
 export function PropertiesPanel({ engineHardware }: { engineHardware: string | null }) {
-  const selectedClipId = useProjectStore((s) => s.selectedClipId);
+  const selectedClipIds = useProjectStore((s) => s.selectedClipIds);
+  const selectedClipId = selectedClipIds[0] ?? null;
   const clips = useProjectStore((s) => s.clips);
   const assets = useProjectStore((s) => s.assets);
   const selectedClip = clips.find((c) => c.id === selectedClipId);

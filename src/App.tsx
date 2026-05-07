@@ -87,7 +87,7 @@ export default function App() {
       videoPlayerRef.current = player;
 
       demuxMp4Streaming(videoFile, {
-        onTrack: async (track) => {
+        onTrack: async (track, samples) => {
           updateAsset(assetId, {
             durationSec: track.durationSec,
             width: track.width,
@@ -98,6 +98,7 @@ export default function App() {
           addClipForAsset(assetId);
           try {
             await player.configure(track);
+            player.attachRandomAccess(videoFile, samples);
           } catch (e: any) {
             setError(e.message ?? String(e));
           }
@@ -210,13 +211,7 @@ export default function App() {
 
       <div className="flex-1 flex min-h-0">
         <MediaPanel onPick={openPicker} />
-        <PreviewArea
-          ref={canvasRef}
-          onPlayPause={togglePlay}
-          onSeek={onSeek}
-          seekDisabled
-          seekDisabledReason="Forward seek lands when random-access demuxer ships"
-        />
+        <PreviewArea ref={canvasRef} onPlayPause={togglePlay} onSeek={onSeek} />
         <PropertiesPanel engineHardware={hardware} />
       </div>
 

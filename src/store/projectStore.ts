@@ -49,14 +49,21 @@ interface ProjectState {
   assets: MediaAsset[];
   tracks: Track[];
   clips: Clip[];
-  selectedClipId: string | null;
+  /** Active selection — supports multi-select for sync / batch ops. */
+  selectedClipIds: string[];
   currentTime: number;
   isPlaying: boolean;
+  /** Timeline zoom level (1 = 40 px/s baseline, 0.25..6 range). */
+  timelineZoom: number;
 
   addAsset: (asset: MediaAsset) => void;
   updateAsset: (id: string, patch: Partial<MediaAsset>) => void;
   addClipForAsset: (assetId: string) => void;
-  selectClip: (id: string | null) => void;
+  selectClip: (id: string | null, additive?: boolean) => void;
+  selectClips: (ids: string[]) => void;
+  moveClip: (clipId: string, startTime: number) => void;
+  syncSelectedClips: () => void;
+  setTimelineZoom: (z: number) => void;
   setCurrentTime: (t: number) => void;
   setPlaying: (p: boolean) => void;
   reset: () => void;
@@ -77,9 +84,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   assets: [],
   tracks: [],
   clips: [],
-  selectedClipId: null,
+  selectedClipIds: [],
   currentTime: 0,
   isPlaying: false,
+  timelineZoom: 1,
 
   addAsset: (asset) => set((s) => ({ assets: [...s.assets, asset] })),
 
@@ -103,14 +111,60 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         duration: asset.durationSec,
         trimIn: 0,
       };
-      return { tracks, clips: [...s.clips, clip], selectedClipId: clip.id };
+      return { tracks, clips: [...s.clips, clip], selectedClipIds: [clip.id] };
     }),
 
-  selectClip: (id) => set({ selectedClipId: id }),
+  selectClip: (id, additive) =>
+    set((s) => {
+      if (id === null) return { selectedClipIds: [] };
+      if (additive) {
+        return s.selectedClipIds.includes(id)
+          ? { selectedClipIds: s.selectedClipIds.filter((x) => x !== id) }
+          : { selectedClipIds: [...s.selectedClipIds, id] };
+      }
+      return { selectedClipIds: [id] };
+    }),
+  selectClips: (ids) => set({ selectedClipIds: ids }),
+
+  moveClip: (clipId, startTime) =>
+    set((s) => ({
+      clips: s.clips.map((c) =>
+        c.id === clipId ? { ...c, startTime: Math.max(0, startTime) } : c,
+      ),
+    })),
+
+  /**
+   * Align the start times of every selected clip to the earliest one. Same
+   * "sync clips" workflow CapCut exposes via right-click — useful when you've
+   * imported camera video + a separate audio recording and need them lined
+   * up at zero (or anywhere else they were both rolling).
+   */
+  syncSelectedClips: () =>
+    set((s) => {
+      const selected = s.clips.filter((c) => s.selectedClipIds.includes(c.id));
+      if (selected.length < 2) return s;
+      const earliest = Math.min(...selected.map((c) => c.startTime));
+      return {
+        clips: s.clips.map((c) =>
+          s.selectedClipIds.includes(c.id) ? { ...c, startTime: earliest } : c,
+        ),
+      };
+    }),
+
+  setTimelineZoom: (z) => set({ timelineZoom: Math.max(0.25, Math.min(6, z)) }),
   setCurrentTime: (t) => set({ currentTime: t }),
   setPlaying: (p) => set({ isPlaying: p }),
 
-  reset: () => set({ assets: [], tracks: [], clips: [], selectedClipId: null, currentTime: 0, isPlaying: false }),
+  reset: () =>
+    set({
+      assets: [],
+      tracks: [],
+      clips: [],
+      selectedClipIds: [],
+      currentTime: 0,
+      isPlaying: false,
+      timelineZoom: 1,
+    }),
 }));
 
 export const projectDuration = (s: { clips: Clip[] }) =>
