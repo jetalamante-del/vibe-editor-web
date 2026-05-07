@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Pause, Play, Upload } from "lucide-react";
+import { Music, Pause, Play, Upload } from "lucide-react";
 import { demuxMp4 } from "./lib/mp4Demuxer";
 import { WebCodecsPlayer } from "./lib/webcodecsPlayer";
+import { AudioPlayer } from "./lib/audioPlayer";
 
-interface FileInfo {
+type MediaKind = "video" | "audio";
+
+interface VideoFileInfo {
+  kind: "video";
   name: string;
   codec: string;
   width: number;
@@ -13,63 +17,158 @@ interface FileInfo {
   hardware: string;
 }
 
+interface AudioFileInfo {
+  kind: "audio";
+  name: string;
+  durationSec: number;
+  sampleRate: number;
+  channels: number;
+}
+
+type FileInfo = VideoFileInfo | AudioFileInfo;
+
+const VIDEO_EXTS = [".mp4", ".mov", ".m4v"];
+const AUDIO_EXTS = [".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"];
+
+const detectKind = (file: File): MediaKind | null => {
+  const name = file.name.toLowerCase();
+  if (file.type.startsWith("video/") || VIDEO_EXTS.some((e) => name.endsWith(e))) return "video";
+  if (file.type.startsWith("audio/") || AUDIO_EXTS.some((e) => name.endsWith(e))) return "audio";
+  return null;
+};
+
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const playerRef = useRef<WebCodecsPlayer | null>(null);
+  const videoPlayerRef = useRef<WebCodecsPlayer | null>(null);
+  const audioPlayerRef = useRef<AudioPlayer | null>(null);
   const [info, setInfo] = useState<FileInfo | null>(null);
   const [state, setState] = useState<string>("idle");
   const [time, setTime] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const [webcodecsAvailable] = useState(() => typeof window !== "undefined" && "VideoDecoder" in window);
 
-  useEffect(() => () => playerRef.current?.dispose(), []);
+  useEffect(
+    () => () => {
+      videoPlayerRef.current?.dispose();
+      audioPlayerRef.current?.dispose();
+    },
+    [],
+  );
 
-  const onFile = async (file: File) => {
-    if (!canvasRef.current) return;
+  const handleFile = async (file: File) => {
+    const kind = detectKind(file);
+    if (!kind) {
+      setError(`Unsupported file type: ${file.name}`);
+      return;
+    }
     setError(null);
     setInfo(null);
-    setState("demuxing");
-    try {
-      const { track, chunks } = await demuxMp4(file);
-      const player = new WebCodecsPlayer(canvasRef.current, {
-        onState: setState,
-        onTime: setTime,
-        onError: (e) => setError(e.message),
-        onConfigured: ({ codec, hardwareAcceleration }) =>
-          setInfo({
-            name: file.name,
-            codec,
-            width: track.width,
-            height: track.height,
-            durationSec: track.durationSec,
-            fps: track.fps,
-            hardware: hardwareAcceleration,
-          }),
-      });
-      playerRef.current?.dispose();
-      playerRef.current = player;
-      await player.load(track, chunks);
-    } catch (e: any) {
-      setError(e.message ?? String(e));
-      setState("error");
+    setTime(0);
+    videoPlayerRef.current?.dispose();
+    audioPlayerRef.current?.dispose();
+    videoPlayerRef.current = null;
+    audioPlayerRef.current = null;
+
+    if (kind === "video") {
+      if (!canvasRef.current) return;
+      setState("demuxing");
+      try {
+        const { track, chunks } = await demuxMp4(file);
+        const player = new WebCodecsPlayer(canvasRef.current, {
+          onState: setState,
+          onTime: setTime,
+          onError: (e) => setError(e.message),
+          onConfigured: ({ codec, hardwareAcceleration }) =>
+            setInfo({
+              kind: "video",
+              name: file.name,
+              codec,
+              width: track.width,
+              height: track.height,
+              durationSec: track.durationSec,
+              fps: track.fps,
+              hardware: hardwareAcceleration,
+            }),
+        });
+        videoPlayerRef.current = player;
+        await player.load(track, chunks);
+      } catch (e: any) {
+        setError(e.message ?? String(e));
+        setState("error");
+      }
+    } else {
+      setState("decoding");
+      try {
+        const player = new AudioPlayer({
+          onState: setState,
+          onTime: setTime,
+          onError: (e) => setError(e.message),
+          onLoaded: ({ durationSec, sampleRate, channels }) =>
+            setInfo({ kind: "audio", name: file.name, durationSec, sampleRate, channels }),
+        });
+        audioPlayerRef.current = player;
+        await player.load(file);
+      } catch (e: any) {
+        setError(e.message ?? String(e));
+        setState("error");
+      }
     }
   };
 
   const togglePlay = () => {
-    const p = playerRef.current;
+    const p = videoPlayerRef.current ?? audioPlayerRef.current;
     if (!p) return;
     state === "playing" ? p.pause() : p.play();
   };
 
   const onSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    playerRef.current?.seek(Number(e.target.value));
+    const p = videoPlayerRef.current ?? audioPlayerRef.current;
+    p?.seek(Number(e.target.value));
   };
+
+  // Drag-and-drop on the whole window so the user can drop anywhere
+  // — without preventDefault on dragover the browser navigates away to the file.
+  useEffect(() => {
+    const onDragOver = (e: DragEvent) => {
+      if (!e.dataTransfer?.types.includes("Files")) return;
+      e.preventDefault();
+      setIsDragging(true);
+    };
+    const onDragLeave = (e: DragEvent) => {
+      if (e.relatedTarget === null) setIsDragging(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      e.preventDefault();
+      setIsDragging(false);
+      const file = e.dataTransfer?.files?.[0];
+      if (file) void handleFile(file);
+    };
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("dragleave", onDragLeave);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("dragleave", onDragLeave);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, []);
 
   const fmt = (s: number) =>
     `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}.${String(Math.floor((s % 1) * 100)).padStart(2, "0")}`;
 
+  const duration = info?.durationSec ?? 0;
+
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full flex flex-col relative">
+      {isDragging && (
+        <div className="fixed inset-0 z-50 pointer-events-none border-4 border-accent bg-accent/10 flex items-center justify-center">
+          <div className="bg-surface-1 border border-accent rounded-xl px-8 py-6 text-text-primary font-medium">
+            Drop to import
+          </div>
+        </div>
+      )}
+
       <header className="px-6 py-4 border-b border-border flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold text-text-primary">Vibe Editor</h1>
@@ -88,48 +187,51 @@ export default function App() {
           <label className="cursor-pointer border border-dashed border-border rounded-2xl px-12 py-16 hover:border-accent transition-colors flex flex-col items-center gap-4 bg-surface-0">
             <Upload className="w-10 h-10 text-text-muted" />
             <div className="text-center">
-              <p className="text-text-primary font-medium">Drop or pick a video</p>
-              <p className="text-sm text-text-muted mt-1">MP4, MOV — H.264, HEVC, AV1</p>
+              <p className="text-text-primary font-medium">Drop or pick a media file</p>
+              <p className="text-sm text-text-muted mt-1">Video: MP4, MOV (H.264, HEVC, AV1)</p>
+              <p className="text-sm text-text-muted">Audio: WAV, MP3, M4A, AAC, FLAC</p>
             </div>
             <input
               type="file"
-              accept="video/mp4,video/quicktime,.mp4,.mov"
+              accept="video/*,audio/*,.mp4,.mov,.m4v,.wav,.mp3,.m4a,.aac,.flac,.ogg"
               className="hidden"
               onChange={(e) => {
                 const f = e.target.files?.[0];
-                if (f) void onFile(f);
+                if (f) void handleFile(f);
               }}
             />
           </label>
-        ) : (
+        ) : info.kind === "video" ? (
           <div className="w-full max-w-5xl flex flex-col gap-4 min-h-0">
             <div className="bg-black rounded-lg overflow-hidden flex items-center justify-center" style={{ aspectRatio: `${info.width} / ${info.height}` }}>
               <canvas ref={canvasRef} className="w-full h-full object-contain" />
             </div>
-            <div className="bg-surface-0 border border-border rounded-lg p-4 flex flex-col gap-3">
-              <div className="flex items-center gap-3">
-                <button onClick={togglePlay} className="rounded-md bg-accent/20 hover:bg-accent/30 border border-accent/40 px-3 py-1.5 flex items-center gap-2 text-sm">
-                  {state === "playing" ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-                  {state === "playing" ? "Pause" : "Play"}
-                </button>
-                <div className="text-xs text-text-muted font-mono min-w-[120px]">
-                  {fmt(time)} / {fmt(info.durationSec)}
-                </div>
-                <input type="range" min={0} max={info.durationSec} step={0.01} value={time} onChange={onSeek} className="flex-1 accent-cyan-400" />
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-                <Field label="File" value={info.name} />
-                <Field label="Codec" value={info.codec} />
-                <Field label="Resolution" value={`${info.width}×${info.height}`} />
-                <Field label="FPS" value={info.fps.toFixed(2)} />
-                <Field label="Duration" value={fmt(info.durationSec)} />
-                <Field
-                  label="Hardware decode"
-                  value={info.hardware}
-                  highlight={info.hardware.includes("hardware") || info.hardware === "no-preference"}
-                />
-                <Field label="State" value={state} />
-              </div>
+            <Transport state={state} time={time} duration={duration} onPlay={togglePlay} onSeek={onSeek} fmt={fmt} />
+            <div className="bg-surface-0 border border-border rounded-lg p-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <Field label="File" value={info.name} />
+              <Field label="Codec" value={info.codec} />
+              <Field label="Resolution" value={`${info.width}×${info.height}`} />
+              <Field label="FPS" value={info.fps.toFixed(2)} />
+              <Field label="Duration" value={fmt(info.durationSec)} />
+              <Field label="Hardware decode" value={info.hardware} highlight={info.hardware.includes("hardware") || info.hardware === "no-preference"} />
+              <Field label="State" value={state} />
+            </div>
+          </div>
+        ) : (
+          <div className="w-full max-w-3xl flex flex-col gap-4">
+            <div className="bg-surface-0 border border-border rounded-lg flex flex-col items-center justify-center py-16 gap-3">
+              <Music className="w-12 h-12 text-accent" />
+              <p className="text-text-primary font-medium">{info.name}</p>
+              <p className="text-text-muted text-xs">Audio · Web Audio API · 24-bit safe</p>
+            </div>
+            <Transport state={state} time={time} duration={duration} onPlay={togglePlay} onSeek={onSeek} fmt={fmt} />
+            <div className="bg-surface-0 border border-border rounded-lg p-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <Field label="File" value={info.name} />
+              <Field label="Sample rate" value={`${info.sampleRate} Hz`} />
+              <Field label="Channels" value={String(info.channels)} />
+              <Field label="Duration" value={fmt(info.durationSec)} />
+              <Field label="Engine" value="Web Audio API" highlight />
+              <Field label="State" value={state} />
             </div>
           </div>
         )}
@@ -137,9 +239,38 @@ export default function App() {
       </main>
 
       <footer className="px-6 py-3 border-t border-border text-xs text-text-muted flex justify-between">
-        <span>v0.0.1 · Web preview engine: WebCodecs + Canvas2D</span>
+        <span>v0.0.1 · Web preview engine: WebCodecs + Web Audio</span>
         <span>{state}</span>
       </footer>
+    </div>
+  );
+}
+
+function Transport({
+  state,
+  time,
+  duration,
+  onPlay,
+  onSeek,
+  fmt,
+}: {
+  state: string;
+  time: number;
+  duration: number;
+  onPlay: () => void;
+  onSeek: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  fmt: (s: number) => string;
+}) {
+  return (
+    <div className="bg-surface-0 border border-border rounded-lg p-4 flex items-center gap-3">
+      <button onClick={onPlay} className="rounded-md bg-accent/20 hover:bg-accent/30 border border-accent/40 px-3 py-1.5 flex items-center gap-2 text-sm">
+        {state === "playing" ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+        {state === "playing" ? "Pause" : "Play"}
+      </button>
+      <div className="text-xs text-text-muted font-mono min-w-[120px]">
+        {fmt(time)} / {fmt(duration)}
+      </div>
+      <input type="range" min={0} max={duration || 1} step={0.01} value={time} onChange={onSeek} className="flex-1 accent-cyan-400" />
     </div>
   );
 }
