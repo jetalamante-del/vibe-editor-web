@@ -15,6 +15,11 @@ interface VideoFileInfo {
   durationSec: number;
   fps: number;
   hardware: string;
+  // Optional secondary audio track imported alongside.
+  audioFileName?: string;
+  audioSampleRate?: number;
+  audioChannels?: number;
+  audioDurationSec?: number;
 }
 
 interface AudioFileInfo {
@@ -56,12 +61,17 @@ export default function App() {
     [],
   );
 
-  const handleFile = async (file: File) => {
-    const kind = detectKind(file);
-    if (!kind) {
-      setError(`Unsupported file type: ${file.name}`);
+  const handleFiles = async (files: File[]) => {
+    const sorted = files
+      .map((f) => ({ f, kind: detectKind(f) }))
+      .filter((x): x is { f: File; kind: MediaKind } => x.kind !== null);
+    if (sorted.length === 0) {
+      setError(`Unsupported file type${files.length > 1 ? "s" : ""}: ${files.map((f) => f.name).join(", ")}`);
       return;
     }
+    const videoFile = sorted.find((x) => x.kind === "video")?.f;
+    const audioFile = sorted.find((x) => x.kind === "audio")?.f;
+
     setError(null);
     setInfo(null);
     setTime(0);
@@ -70,26 +80,32 @@ export default function App() {
     videoPlayerRef.current = null;
     audioPlayerRef.current = null;
 
-    if (kind === "video") {
+    // Time updates only come from the video clock when both are present
+    // (otherwise audio drives). State follows whichever drives.
+    const driver: "video" | "audio" = videoFile ? "video" : "audio";
+
+    if (videoFile) {
       if (!canvasRef.current) return;
       setState("demuxing");
       try {
-        const { track, chunks } = await demuxMp4(file);
+        const { track, chunks } = await demuxMp4(videoFile);
         const player = new WebCodecsPlayer(canvasRef.current, {
-          onState: setState,
-          onTime: setTime,
+          onState: driver === "video" ? setState : undefined,
+          onTime: driver === "video" ? setTime : undefined,
           onError: (e) => setError(e.message),
           onConfigured: ({ codec, hardwareAcceleration }) =>
-            setInfo({
+            setInfo((prev) => ({
+              ...((prev ?? {}) as object),
               kind: "video",
-              name: file.name,
+              name: videoFile.name,
               codec,
               width: track.width,
               height: track.height,
               durationSec: track.durationSec,
               fps: track.fps,
               hardware: hardwareAcceleration,
-            }),
+              audioFileName: audioFile?.name,
+            }) as VideoFileInfo),
         });
         videoPlayerRef.current = player;
         await player.load(track, chunks);
@@ -97,18 +113,24 @@ export default function App() {
         setError(e.message ?? String(e));
         setState("error");
       }
-    } else {
-      setState("decoding");
+    }
+
+    if (audioFile) {
       try {
         const player = new AudioPlayer({
-          onState: setState,
-          onTime: setTime,
+          onState: driver === "audio" ? setState : undefined,
+          onTime: driver === "audio" ? setTime : undefined,
           onError: (e) => setError(e.message),
           onLoaded: ({ durationSec, sampleRate, channels }) =>
-            setInfo({ kind: "audio", name: file.name, durationSec, sampleRate, channels }),
+            setInfo((prev) => {
+              if (prev?.kind === "video") {
+                return { ...prev, audioFileName: audioFile.name, audioSampleRate: sampleRate, audioChannels: channels, audioDurationSec: durationSec };
+              }
+              return { kind: "audio", name: audioFile.name, durationSec, sampleRate, channels };
+            }),
         });
         audioPlayerRef.current = player;
-        await player.load(file);
+        await player.load(audioFile);
       } catch (e: any) {
         setError(e.message ?? String(e));
         setState("error");
@@ -116,15 +138,27 @@ export default function App() {
     }
   };
 
+  // Drive both players together. Video clock leads; audio is started/stopped
+  // and seeked alongside it. Sync drift accumulates in long playback because
+  // their clocks are independent — fine for the POC, the proper fix is to
+  // route audio through the same wall-clock the video rAF uses.
   const togglePlay = () => {
-    const p = videoPlayerRef.current ?? audioPlayerRef.current;
-    if (!p) return;
-    state === "playing" ? p.pause() : p.play();
+    const v = videoPlayerRef.current;
+    const a = audioPlayerRef.current;
+    if (!v && !a) return;
+    if (state === "playing") {
+      v?.pause();
+      a?.pause();
+    } else {
+      v?.play();
+      a?.play();
+    }
   };
 
   const onSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const p = videoPlayerRef.current ?? audioPlayerRef.current;
-    p?.seek(Number(e.target.value));
+    const t = Number(e.target.value);
+    videoPlayerRef.current?.seek(t);
+    audioPlayerRef.current?.seek(t);
   };
 
   // Drag-and-drop on the whole window so the user can drop anywhere
@@ -141,8 +175,8 @@ export default function App() {
     const onDrop = (e: DragEvent) => {
       e.preventDefault();
       setIsDragging(false);
-      const file = e.dataTransfer?.files?.[0];
-      if (file) void handleFile(file);
+      const files = Array.from(e.dataTransfer?.files ?? []);
+      if (files.length) void handleFiles(files);
     };
     window.addEventListener("dragover", onDragOver);
     window.addEventListener("dragleave", onDragLeave);
@@ -193,11 +227,12 @@ export default function App() {
             </div>
             <input
               type="file"
+              multiple
               accept="video/*,audio/*,.mp4,.mov,.m4v,.wav,.mp3,.m4a,.aac,.flac,.ogg"
               className="hidden"
               onChange={(e) => {
-                const f = e.target.files?.[0];
-                if (f) void handleFile(f);
+                const files = Array.from(e.target.files ?? []);
+                if (files.length) void handleFiles(files);
               }}
             />
           </label>
@@ -208,13 +243,20 @@ export default function App() {
             </div>
             <Transport state={state} time={time} duration={duration} onPlay={togglePlay} onSeek={onSeek} fmt={fmt} />
             <div className="bg-surface-0 border border-border rounded-lg p-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-              <Field label="File" value={info.name} />
+              <Field label="Video file" value={info.name} />
               <Field label="Codec" value={info.codec} />
               <Field label="Resolution" value={`${info.width}×${info.height}`} />
               <Field label="FPS" value={info.fps.toFixed(2)} />
               <Field label="Duration" value={fmt(info.durationSec)} />
               <Field label="Hardware decode" value={info.hardware} highlight={info.hardware.includes("hardware") || info.hardware === "no-preference"} />
               <Field label="State" value={state} />
+              {info.audioFileName && (
+                <>
+                  <Field label="Audio file" value={info.audioFileName} highlight />
+                  <Field label="Audio sample rate" value={`${info.audioSampleRate ?? "?"} Hz`} />
+                  <Field label="Audio channels" value={String(info.audioChannels ?? "?")} />
+                </>
+              )}
             </div>
           </div>
         ) : (
