@@ -117,10 +117,13 @@ export default function App() {
         setError(msg);
         return;
       }
-      setState("demuxing");
-      console.log("[vibe] starting demuxMp4 for", videoFile.name);
+      setState("demuxing 0%");
+      console.log("[vibe] starting demuxMp4 for", videoFile.name, "size:", videoFile.size);
       try {
-        const { track, chunks } = await demuxMp4(videoFile);
+        const { track, chunks } = await demuxMp4(videoFile, (loaded, total) => {
+          const pct = Math.floor((loaded / total) * 100);
+          setState(`demuxing ${pct}%`);
+        });
         console.log("[vibe] demuxed", { codec: track.codec, chunks: chunks.length, width: track.width, height: track.height, durationSec: track.durationSec });
         const player = new WebCodecsPlayer(canvasRef.current, {
           onState: driver === "video" ? setState : undefined,
