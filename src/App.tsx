@@ -77,6 +77,21 @@ export default function App() {
     const audioFile = sorted.find((x) => x.kind === "audio")?.f;
     console.log("[vibe] routing:", { video: videoFile?.name, audio: audioFile?.name });
 
+    // mp4box accumulates the whole file in memory until it finds the moov box.
+    // Sony cameras put moov at the END, so an 8 GB capture forces ~8 GB of
+    // browser heap before even one frame can be emitted. Until we replace
+    // mp4box with a random-access demuxer, refuse files past a sane limit.
+    const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
+    if (videoFile && videoFile.size > MAX_VIDEO_BYTES) {
+      const gb = (videoFile.size / 1024 / 1024 / 1024).toFixed(1);
+      setError(
+        `Video file is ${gb} GB. The current demuxer can't stream files larger than 2 GB without a custom random-access reader (coming next). Drop a smaller file, or use the 1080p H.264 proxy at ~/Desktop/C0126_proxy_1080p.mp4 (already generated for you).`,
+      );
+      setState("idle");
+      setInfo(null);
+      return;
+    }
+
     setError(null);
     setInfo(null);
     setTime(0);
