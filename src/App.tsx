@@ -37,6 +37,8 @@ export default function App() {
   const setCurrentTime = useProjectStore((s) => s.setCurrentTime);
   const setPlaying = useProjectStore((s) => s.setPlaying);
   const isPlaying = useProjectStore((s) => s.isPlaying);
+  const mediaPanelOpen = useProjectStore((s) => s.mediaPanelOpen);
+  const propertiesPanelOpen = useProjectStore((s) => s.propertiesPanelOpen);
 
   useEffect(
     () => () => {
@@ -213,9 +215,9 @@ export default function App() {
       />
 
       <div className="flex-1 flex min-h-0">
-        <MediaPanel onPick={openPicker} />
+        {mediaPanelOpen && <MediaPanel onPick={openPicker} />}
         <PreviewArea ref={canvasRef} onPlayPause={togglePlay} onSeek={onSeek} />
-        <PropertiesPanel engineHardware={hardware} />
+        {propertiesPanelOpen && <PropertiesPanel engineHardware={hardware} />}
       </div>
 
       <Timeline />

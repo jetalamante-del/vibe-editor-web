@@ -70,6 +70,12 @@ interface ProjectState {
   setCurrentTime: (t: number) => void;
   setPlaying: (p: boolean) => void;
   reset: () => void;
+
+  /** Layout: per-panel collapse state, persisted across reloads via localStorage. */
+  mediaPanelOpen: boolean;
+  propertiesPanelOpen: boolean;
+  toggleMediaPanel: () => void;
+  toggleProperties: () => void;
 }
 
 const ensureTrack = (state: ProjectState, kind: MediaKind): { tracks: Track[]; track: Track } => {
@@ -83,6 +89,22 @@ const ensureTrack = (state: ProjectState, kind: MediaKind): { tracks: Track[]; t
   return { tracks: [...state.tracks, track], track };
 };
 
+const readPanelPref = (key: string, fallback: boolean): boolean => {
+  if (typeof window === "undefined") return fallback;
+  const v = window.localStorage.getItem(key);
+  if (v === null) {
+    // Below ~1024px the layout is too cramped to start with both panels open;
+    // collapse the right panel by default on small screens.
+    return window.innerWidth >= 1280 ? fallback : false;
+  }
+  return v === "1";
+};
+
+const writePanelPref = (key: string, value: boolean) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(key, value ? "1" : "0");
+};
+
 export const useProjectStore = create<ProjectState>((set, get) => ({
   assets: [],
   tracks: [],
@@ -91,6 +113,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   currentTime: 0,
   isPlaying: false,
   timelineZoom: 1,
+  mediaPanelOpen: readPanelPref("vibe.mediaPanelOpen", true),
+  propertiesPanelOpen: readPanelPref("vibe.propertiesPanelOpen", true),
 
   addAsset: (asset) => set((s) => ({ assets: [...s.assets, asset] })),
 
@@ -174,6 +198,19 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   setTimelineZoom: (z) => set({ timelineZoom: Math.max(0.25, Math.min(6, z)) }),
   setCurrentTime: (t) => set({ currentTime: t }),
   setPlaying: (p) => set({ isPlaying: p }),
+
+  toggleMediaPanel: () =>
+    set((s) => {
+      const next = !s.mediaPanelOpen;
+      writePanelPref("vibe.mediaPanelOpen", next);
+      return { mediaPanelOpen: next };
+    }),
+  toggleProperties: () =>
+    set((s) => {
+      const next = !s.propertiesPanelOpen;
+      writePanelPref("vibe.propertiesPanelOpen", next);
+      return { propertiesPanelOpen: next };
+    }),
 
   reset: () =>
     set({

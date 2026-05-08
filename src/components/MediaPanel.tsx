@@ -11,7 +11,7 @@ export function MediaPanel({ onPick }: { onPick: () => void }) {
   return (
     <aside
       aria-label="Media library"
-      className="w-72 shrink-0 border-r border-border bg-surface-0 flex flex-col min-h-0"
+      className="w-60 lg:w-72 shrink-0 border-r border-border bg-surface-0 flex flex-col min-h-0"
     >
       <div className="border-b border-border">
         <div role="tablist" aria-label="Media categories" className="flex">
