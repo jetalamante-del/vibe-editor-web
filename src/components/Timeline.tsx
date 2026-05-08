@@ -13,8 +13,22 @@ interface DragState {
 interface ContextMenu {
   x: number;
   y: number;
-  clipId: string;
+  clipId: string | null;
 }
+
+/** Marquee rectangle in *content* coordinates (relative to scrollable area). */
+interface Marquee {
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+  additive: boolean;
+}
+
+/** Track row Y bounds inside the scrollable content area. */
+const RULER_H = 28;
+const TRACK_H = 56;
+const CLIP_INNER_PAD_Y = 6;
 
 export function Timeline() {
   const tracks = useProjectStore((s) => s.tracks);
@@ -23,6 +37,7 @@ export function Timeline() {
   const currentTime = useProjectStore((s) => s.currentTime);
   const selectedClipIds = useProjectStore((s) => s.selectedClipIds);
   const selectClip = useProjectStore((s) => s.selectClip);
+  const selectClips = useProjectStore((s) => s.selectClips);
   const moveClip = useProjectStore((s) => s.moveClip);
   const syncSelected = useProjectStore((s) => s.syncSelectedClips);
   const zoom = useProjectStore((s) => s.timelineZoom);
@@ -35,6 +50,7 @@ export function Timeline() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [menu, setMenu] = useState<ContextMenu | null>(null);
+  const [marquee, setMarquee] = useState<Marquee | null>(null);
 
   // Pinch-to-zoom + Cmd/Ctrl+wheel on the timeline. The trackpad pinch gesture
   // arrives as a wheel event with ctrlKey set on macOS. Anchor the zoom to
@@ -76,6 +92,73 @@ export function Timeline() {
       window.removeEventListener("pointerup", onUp);
     };
   }, [drag, pps, moveClip]);
+
+  /**
+   * Marquee selection — click + drag in empty timeline space to box-select.
+   * Standard editor behavior: drag replaces selection, shift-drag adds to it.
+   * Coordinates are tracked in *content* space (relative to the scrollable
+   * div's content), not viewport, so the box stays correct while scrolling.
+   */
+  useEffect(() => {
+    if (!marquee) return;
+    const onMove = (ev: PointerEvent) => {
+      const container = scrollRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const x = ev.clientX - rect.left + container.scrollLeft;
+      const y = ev.clientY - rect.top + container.scrollTop;
+      setMarquee((m) => (m ? { ...m, currentX: x, currentY: y } : null));
+    };
+    const onUp = () => {
+      const x1 = Math.min(marquee.startX, marquee.currentX);
+      const x2 = Math.max(marquee.startX, marquee.currentX);
+      const y1 = Math.min(marquee.startY, marquee.currentY);
+      const y2 = Math.max(marquee.startY, marquee.currentY);
+
+      const intersected: string[] = [];
+      // Treat zero-area drags as a deselect-by-click on empty.
+      if (x2 - x1 > 2 || y2 - y1 > 2) {
+        for (const clip of clips) {
+          const trackIdx = tracks.findIndex((t) => t.id === clip.trackId);
+          if (trackIdx < 0) continue;
+          const cTop = RULER_H + trackIdx * TRACK_H + CLIP_INNER_PAD_Y;
+          const cBottom = RULER_H + (trackIdx + 1) * TRACK_H - CLIP_INNER_PAD_Y;
+          const cLeft = clip.startTime * pps;
+          const cRight = cLeft + Math.max(20, clip.duration * pps);
+          const overlaps = !(x2 < cLeft || x1 > cRight || y2 < cTop || y1 > cBottom);
+          if (overlaps) intersected.push(clip.id);
+        }
+      }
+
+      if (marquee.additive) {
+        const merged = Array.from(new Set([...selectedClipIds, ...intersected]));
+        selectClips(merged);
+      } else {
+        selectClips(intersected);
+      }
+      setMarquee(null);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, [marquee, clips, tracks, pps, selectedClipIds, selectClips]);
+
+  /** Pointer-down on the scrollable content. Starts a marquee unless the
+   *  pointer landed on a clip (data-clip-id) — those bubble their own drag. */
+  const onContentPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.closest("[data-clip-id]")) return;
+    const container = scrollRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const x = e.clientX - rect.left + container.scrollLeft;
+    const y = e.clientY - rect.top + container.scrollTop;
+    setMarquee({ startX: x, startY: y, currentX: x, currentY: y, additive: e.shiftKey || e.metaKey });
+  };
 
   // Dismiss the right-click menu on any outside click / Escape.
   useEffect(() => {
@@ -143,6 +226,7 @@ export function Timeline() {
         <div
           ref={scrollRef}
           onWheel={onWheel}
+          onPointerDown={onContentPointerDown}
           className="flex-1 overflow-x-auto overflow-y-hidden relative"
         >
           <div style={{ width: contentWidth, position: "relative" }}>
@@ -189,6 +273,18 @@ export function Timeline() {
             >
               <div className="w-2 h-2 -ml-[3px] bg-accent rounded-sm" />
             </div>
+
+            {marquee && (
+              <div
+                className="absolute bg-accent/15 border border-accent/70 pointer-events-none z-30"
+                style={{
+                  left: Math.min(marquee.startX, marquee.currentX),
+                  top: Math.min(marquee.startY, marquee.currentY),
+                  width: Math.abs(marquee.currentX - marquee.startX),
+                  height: Math.abs(marquee.currentY - marquee.startY),
+                }}
+              />
+            )}
           </div>
         </div>
       </div>
@@ -275,6 +371,7 @@ function TrackRow({
         return (
           <div
             key={c.id}
+            data-clip-id={c.id}
             onPointerDown={(e) => onClipPointerDown(c.id, e)}
             onContextMenu={(e) => {
               e.preventDefault();
@@ -286,7 +383,7 @@ function TrackRow({
                 : "bg-emerald-900/60 border border-emerald-700/60 hover:bg-emerald-900/80"
             } ${selected ? "ring-2 ring-accent" : ""}`}
             style={{ left, width }}
-            title={`${getAssetName(c.assetId)} — right-click for options`}
+            title={`${getAssetName(c.assetId)} — right-click for options · shift-click to multi-select`}
           >
             {getAssetName(c.assetId)}
           </div>
