@@ -76,7 +76,7 @@ function Field({ label, value, highlight }: { label: string; value: string; high
   return (
     <div className="flex items-center justify-between gap-2">
       <span className="text-text-muted">{label}</span>
-      <span className={`font-mono truncate ${highlight ? "text-emerald-400" : "text-text-primary"}`}>{value}</span>
+      <span className={`font-mono truncate ${highlight ? "text-success" : "text-text-primary"}`}>{value}</span>
     </div>
   );
 }

@@ -52,7 +52,7 @@ export function TopBar({ webcodecsAvailable }: { webcodecsAvailable: boolean }) 
 
       <div className="text-xs text-text-muted hidden lg:block ml-2" aria-live="polite">
         WebCodecs:{" "}
-        <span className={webcodecsAvailable ? "text-emerald-400" : "text-red-400"}>
+        <span className={webcodecsAvailable ? "text-success" : "text-danger"}>
           {webcodecsAvailable ? "available" : "unavailable"}
         </span>
       </div>

@@ -10,6 +10,20 @@
   --color-text-muted: #99a2ad;
   --color-accent: #53a9ff;
   --color-accent-soft: #8cc7ff;
+
+  /* Semantic clip colors — referenced as bg-clip-video / bg-clip-audio,
+     so a future track type or theme switch lives in one place. */
+  --color-clip-video: #155e75;
+  --color-clip-video-border: #0e7490;
+  --color-clip-audio: #14532d;
+  --color-clip-audio-border: #15803d;
+
+  /* Status colors. Using these instead of raw red-* / amber-* / emerald-*
+     keeps error toasts and warning labels consistent with the editor theme. */
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+  --color-danger-soft: #7f1d1d;
 }
 
 html, body, #root {

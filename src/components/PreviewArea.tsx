@@ -101,7 +101,7 @@ export const PreviewArea = forwardRef<HTMLCanvasElement, Props>(function Preview
           className="flex-1 accent-cyan-400 disabled:opacity-40"
         />
         {seekDisabled && seekDisabledReason && (
-          <span className="text-[10px] text-amber-400/80 hidden lg:block">{seekDisabledReason}</span>
+          <span className="text-[10px] text-warning/80 hidden lg:block">{seekDisabledReason}</span>
         )}
       </div>
     </section>

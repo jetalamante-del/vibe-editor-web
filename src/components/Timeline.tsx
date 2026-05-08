@@ -401,8 +401,8 @@ const TrackRow = memo(function TrackRow({
             }}
             className={`absolute top-1.5 bottom-1.5 rounded text-[11px] text-left px-2 truncate cursor-grab select-none transition-colors ${
               isVideo
-                ? "bg-cyan-900/60 border border-cyan-700/60 hover:bg-cyan-900/80"
-                : "bg-emerald-900/60 border border-emerald-700/60 hover:bg-emerald-900/80"
+                ? "bg-clip-video/60 border border-clip-video-border/60 hover:bg-clip-video/80"
+                : "bg-clip-audio/60 border border-clip-audio-border/60 hover:bg-clip-audio/80"
             } ${selected ? "ring-2 ring-accent" : ""}`}
             style={{ left, width }}
             title={`${getAssetName(c.assetId)} — right-click for options · shift-click to multi-select · arrows to nudge · Cmd+G to sync`}

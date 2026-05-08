@@ -223,11 +223,15 @@ export default function App() {
       <Timeline />
 
       {error && (
-        <div className="fixed bottom-4 right-4 max-w-md bg-red-950/80 border border-red-900 text-red-200 rounded-md px-4 py-2 text-sm shadow-xl">
+        <div
+          role="alert"
+          className="fixed bottom-4 right-4 max-w-md bg-danger-soft/80 border border-danger/60 text-text-primary rounded-md px-4 py-2 text-sm shadow-xl"
+        >
           {error}
           <button
+            type="button"
             onClick={() => setError(null)}
-            className="ml-3 text-red-200/60 hover:text-red-200 text-xs underline"
+            className="ml-3 text-text-muted hover:text-text-primary text-xs underline"
           >
             dismiss
           </button>
