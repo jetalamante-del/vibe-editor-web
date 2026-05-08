@@ -62,6 +62,9 @@ interface ProjectState {
   selectClip: (id: string | null, additive?: boolean) => void;
   selectClips: (ids: string[]) => void;
   moveClip: (clipId: string, startTime: number) => void;
+  nudgeSelectedClips: (deltaSec: number) => void;
+  removeSelectedClips: () => void;
+  selectAllClips: () => void;
   syncSelectedClips: () => void;
   setTimelineZoom: (z: number) => void;
   setCurrentTime: (t: number) => void;
@@ -132,6 +135,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         c.id === clipId ? { ...c, startTime: Math.max(0, startTime) } : c,
       ),
     })),
+
+  nudgeSelectedClips: (deltaSec) =>
+    set((s) => ({
+      clips: s.clips.map((c) =>
+        s.selectedClipIds.includes(c.id)
+          ? { ...c, startTime: Math.max(0, c.startTime + deltaSec) }
+          : c,
+      ),
+    })),
+
+  removeSelectedClips: () =>
+    set((s) => ({
+      clips: s.clips.filter((c) => !s.selectedClipIds.includes(c.id)),
+      selectedClipIds: [],
+    })),
+
+  selectAllClips: () => set((s) => ({ selectedClipIds: s.clips.map((c) => c.id) })),
 
   /**
    * Align the start times of every selected clip to the earliest one. Same

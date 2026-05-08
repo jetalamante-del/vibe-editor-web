@@ -182,21 +182,28 @@ export function Timeline() {
   }, [duration, pps]);
 
   return (
-    <section className="h-64 shrink-0 bg-surface-0 border-t border-border flex flex-col min-h-0">
+    <section
+      aria-label="Timeline"
+      className="h-64 shrink-0 bg-surface-0 border-t border-border flex flex-col min-h-0"
+    >
       <div className="h-9 border-b border-border px-3 flex items-center gap-3 text-xs text-text-muted">
         <span className="font-medium text-text-primary">Timeline</span>
         <span>· {tracks.length} tracks · {clips.length} clips · {duration.toFixed(2)}s</span>
         <div className="flex-1" />
         <span className="text-[10px]">Cmd/Ctrl + scroll to zoom · {(zoom * 100).toFixed(0)}%</span>
         <button
+          type="button"
           onClick={() => setZoom(Math.max(0.25, zoom / 1.25))}
-          className="px-1.5 py-0.5 rounded hover:bg-surface-2 text-text-muted"
+          aria-label="Zoom timeline out"
+          className="px-2 py-1 rounded-md hover:bg-surface-2 text-text-muted min-w-[28px] min-h-[28px]"
         >
           –
         </button>
         <button
+          type="button"
           onClick={() => setZoom(Math.min(6, zoom * 1.25))}
-          className="px-1.5 py-0.5 rounded hover:bg-surface-2 text-text-muted"
+          aria-label="Zoom timeline in"
+          className="px-2 py-1 rounded-md hover:bg-surface-2 text-text-muted min-w-[28px] min-h-[28px]"
         >
           +
         </button>
@@ -372,6 +379,10 @@ function TrackRow({
           <div
             key={c.id}
             data-clip-id={c.id}
+            role="button"
+            tabIndex={0}
+            aria-label={`${getAssetName(c.assetId)} clip · ${c.duration.toFixed(1)}s · ${selected ? "selected" : "not selected"}`}
+            aria-pressed={selected}
             onPointerDown={(e) => onClipPointerDown(c.id, e)}
             onContextMenu={(e) => {
               e.preventDefault();
@@ -383,7 +394,7 @@ function TrackRow({
                 : "bg-emerald-900/60 border border-emerald-700/60 hover:bg-emerald-900/80"
             } ${selected ? "ring-2 ring-accent" : ""}`}
             style={{ left, width }}
-            title={`${getAssetName(c.assetId)} — right-click for options · shift-click to multi-select`}
+            title={`${getAssetName(c.assetId)} — right-click for options · shift-click to multi-select · arrows to nudge · Cmd+G to sync`}
           >
             {getAssetName(c.assetId)}
           </div>

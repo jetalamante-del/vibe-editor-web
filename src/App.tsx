@@ -8,6 +8,7 @@ import { demuxMp4Streaming } from "./lib/mp4Demuxer";
 import { WebCodecsPlayer } from "./lib/webcodecsPlayer";
 import { AudioPlayer } from "./lib/audioPlayer";
 import { useProjectStore, type MediaKind } from "./store/projectStore";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 
 const VIDEO_EXTS = [".mp4", ".mov", ".m4v"];
 const AUDIO_EXTS = [".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"];
@@ -155,6 +156,8 @@ export default function App() {
     audioPlayerRef.current?.seek(sec);
     setCurrentTime(sec);
   };
+
+  useKeyboardShortcuts({ onTogglePlay: togglePlay, onSeek });
 
   const openPicker = () => fileInputRef.current?.click();
 

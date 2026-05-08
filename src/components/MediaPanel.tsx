@@ -9,9 +9,12 @@ export function MediaPanel({ onPick }: { onPick: () => void }) {
   const addClip = useProjectStore((s) => s.addClipForAsset);
 
   return (
-    <aside className="w-72 shrink-0 border-r border-border bg-surface-0 flex flex-col min-h-0">
+    <aside
+      aria-label="Media library"
+      className="w-72 shrink-0 border-r border-border bg-surface-0 flex flex-col min-h-0"
+    >
       <div className="border-b border-border">
-        <div className="flex">
+        <div role="tablist" aria-label="Media categories" className="flex">
           <TabButton active>Media</TabButton>
           <TabButton>Audio</TabButton>
           <TabButton>Text</TabButton>
@@ -44,7 +47,10 @@ export function MediaPanel({ onPick }: { onPick: () => void }) {
 function TabButton({ children, active }: { children: React.ReactNode; active?: boolean }) {
   return (
     <button
-      className={`px-3 py-2 text-sm transition-colors ${
+      type="button"
+      role="tab"
+      aria-selected={active}
+      className={`px-3 py-2 text-sm transition-colors min-h-[36px] ${
         active
           ? "text-text-primary border-b-2 border-accent"
           : "text-text-muted hover:text-text-primary border-b-2 border-transparent"
@@ -73,9 +79,10 @@ function AssetCard({ asset, onAdd }: { asset: MediaAsset; onAdd: () => void }) {
       <div className="px-2 py-1.5 flex items-center gap-2">
         <p className="text-xs text-text-primary truncate flex-1">{asset.name}</p>
         <button
+          type="button"
           onClick={onAdd}
-          className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded bg-accent/20 hover:bg-accent/30 border border-accent/40"
-          title="Add to timeline"
+          aria-label={`Add ${asset.name} to timeline`}
+          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity p-2 rounded bg-accent/20 hover:bg-accent/30 border border-accent/40 min-w-[28px] min-h-[28px] inline-flex items-center justify-center"
         >
           <Plus className="w-3 h-3" />
         </button>

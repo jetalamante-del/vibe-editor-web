@@ -12,7 +12,10 @@ export function PropertiesPanel({ engineHardware }: { engineHardware: string | n
     : null;
 
   return (
-    <aside className="w-72 shrink-0 border-l border-border bg-surface-0 flex flex-col min-h-0">
+    <aside
+      aria-label="Clip properties"
+      className="w-72 shrink-0 border-l border-border bg-surface-0 flex flex-col min-h-0"
+    >
       <div className="border-b border-border px-3 py-2.5 flex items-center gap-2">
         <Settings className="w-4 h-4 text-text-muted" />
         <span className="text-sm font-medium text-text-primary">Properties</span>
