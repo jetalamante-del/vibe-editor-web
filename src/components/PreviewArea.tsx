@@ -5,13 +5,16 @@ import { fmtPrecise as fmt } from "../lib/timecode";
 
 interface Props {
   onPlayPause: () => void;
+  /** Commit a seek — decoder flushes and re-feeds from the keyframe at sec. */
   onSeek: (sec: number) => void;
+  /** Cheap update of the displayed time during a slider drag. No decoder work. */
+  onScrubPreview?: (sec: number) => void;
   seekDisabled?: boolean;
   seekDisabledReason?: string;
 }
 
 export const PreviewArea = forwardRef<HTMLCanvasElement, Props>(function PreviewArea(
-  { onPlayPause, onSeek, seekDisabled, seekDisabledReason },
+  { onPlayPause, onSeek, onScrubPreview, seekDisabled, seekDisabledReason },
   canvasRef,
 ) {
   const isPlaying = useProjectStore((s) => s.isPlaying);
@@ -97,7 +100,24 @@ export const PreviewArea = forwardRef<HTMLCanvasElement, Props>(function Preview
           max={Math.max(duration, 0.01)}
           step={0.01}
           value={currentTime}
-          onChange={(e) => onSeek(Number(e.target.value))}
+          // While the user drags, only update the displayed playhead — issuing
+          // a real decoder seek per pointer move would flush the decoder
+          // dozens of times per second and the user would see each
+          // intermediate keyframe flash. Commit the seek on release.
+          onChange={(e) => onScrubPreview?.(Number(e.target.value))}
+          // Latch a scrubbing flag while the pointer is held so playback ticks
+          // don't overwrite the slider value mid-drag.
+          onPointerDown={() => useProjectStore.setState({ isScrubbing: true })}
+          onPointerUp={(e) => {
+            useProjectStore.setState({ isScrubbing: false });
+            onSeek(Number((e.currentTarget as HTMLInputElement).value));
+          }}
+          onPointerCancel={() => useProjectStore.setState({ isScrubbing: false })}
+          onKeyUp={(e) => {
+            if (["ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"].includes(e.key)) {
+              onSeek(Number((e.currentTarget as HTMLInputElement).value));
+            }
+          }}
           disabled={seekDisabled || !hasContent}
           aria-label="Playback position"
           aria-valuetext={fmt(currentTime)}

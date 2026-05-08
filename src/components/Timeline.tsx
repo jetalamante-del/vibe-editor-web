@@ -310,16 +310,17 @@ export function Timeline() {
           onContextMenu={(e) => e.preventDefault()}
         >
           <MenuItem
-            disabled={selectedClipIds.length < 2}
+            disabled={clips.length < 2}
             onClick={() => {
               syncSelected();
               setMenu(null);
             }}
           >
-            Sync selected clips
-            {selectedClipIds.length < 2 && (
-              <span className="ml-auto text-[10px] text-text-muted">select 2+</span>
-            )}
+            {selectedClipIds.length >= 2
+              ? "Sync selected clips"
+              : selectedClipIds.length === 1
+                ? "Sync everything to this clip"
+                : "Sync all clips"}
           </MenuItem>
           <MenuItem
             onClick={() => {

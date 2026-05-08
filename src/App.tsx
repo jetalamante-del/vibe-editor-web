@@ -83,7 +83,10 @@ export default function App() {
           if (s === "playing") setPlaying(true);
           else if (s === "paused" || s === "ended") setPlaying(false);
         },
-        onTime: (t) => setCurrentTime(t),
+        onTime: (t) => {
+          if (useProjectStore.getState().isScrubbing) return;
+          setCurrentTime(t);
+        },
         onError: (e) => setError(e.message),
         onConfigured: ({ hardwareAcceleration }) => setHardware(hardwareAcceleration),
       });
@@ -124,7 +127,12 @@ export default function App() {
               if (s === "playing") setPlaying(true);
               else if (s === "paused" || s === "ended") setPlaying(false);
             },
-        onTime: videoFile ? undefined : (t) => setCurrentTime(t),
+        onTime: videoFile
+          ? undefined
+          : (t) => {
+              if (useProjectStore.getState().isScrubbing) return;
+              setCurrentTime(t);
+            },
         onError: (e) => setError(e.message),
         onLoaded: ({ durationSec, sampleRate, channels }) => {
           updateAsset(assetId, { durationSec, sampleRate, channels });
@@ -156,6 +164,12 @@ export default function App() {
   const onSeek = (sec: number) => {
     videoPlayerRef.current?.seek(sec);
     audioPlayerRef.current?.seek(sec);
+    setCurrentTime(sec);
+  };
+
+  // Drag preview — just move the displayed playhead without flushing the
+  // decoder. The actual seek commits when the slider is released.
+  const onScrubPreview = (sec: number) => {
     setCurrentTime(sec);
   };
 
@@ -216,7 +230,7 @@ export default function App() {
 
       <div className="flex-1 flex min-h-0">
         {mediaPanelOpen && <MediaPanel onPick={openPicker} />}
-        <PreviewArea ref={canvasRef} onPlayPause={togglePlay} onSeek={onSeek} />
+        <PreviewArea ref={canvasRef} onPlayPause={togglePlay} onSeek={onSeek} onScrubPreview={onScrubPreview} />
         {propertiesPanelOpen && <PropertiesPanel engineHardware={hardware} />}
       </div>
 

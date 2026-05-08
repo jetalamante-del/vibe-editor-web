@@ -53,6 +53,10 @@ interface ProjectState {
   selectedClipIds: string[];
   currentTime: number;
   isPlaying: boolean;
+  /** True while the scrub slider is being actively dragged. Player tick
+   *  updates skip writing currentTime while this is set so the slider
+   *  doesn't snap back mid-drag during playback. */
+  isScrubbing: boolean;
   /** Timeline zoom level (1 = 40 px/s baseline, 0.25..6 range). */
   timelineZoom: number;
 
@@ -112,6 +116,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   selectedClipIds: [],
   currentTime: 0,
   isPlaying: false,
+  isScrubbing: false,
   timelineZoom: 1,
   mediaPanelOpen: readPanelPref("vibe.mediaPanelOpen", true),
   propertiesPanelOpen: readPanelPref("vibe.propertiesPanelOpen", true),
@@ -178,20 +183,35 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   selectAllClips: () => set((s) => ({ selectedClipIds: s.clips.map((c) => c.id) })),
 
   /**
-   * Align the start times of every selected clip to the earliest one. Same
-   * "sync clips" workflow CapCut exposes via right-click — useful when you've
-   * imported camera video + a separate audio recording and need them lined
-   * up at zero (or anywhere else they were both rolling).
+   * Align clip start times. Two modes:
+   *   - 1 clip selected: that clip is the reference; every other clip on the
+   *     timeline jumps to its startTime. Common workflow when you drop a
+   *     video and a separate audio recording — anchor on whichever you
+   *     trust and the rest follows.
+   *   - 2+ selected: align them all to the earliest of the group.
+   *   - 0 selected: align all clips on the timeline to the earliest.
    */
   syncSelectedClips: () =>
     set((s) => {
-      const selected = s.clips.filter((c) => s.selectedClipIds.includes(c.id));
-      if (selected.length < 2) return s;
-      const earliest = Math.min(...selected.map((c) => c.startTime));
+      const ids = s.selectedClipIds;
+      if (s.clips.length < 2) return s;
+      let anchor: number;
+      let targets: string[];
+      if (ids.length === 1) {
+        const ref = s.clips.find((c) => c.id === ids[0]);
+        if (!ref) return s;
+        anchor = ref.startTime;
+        targets = s.clips.map((c) => c.id);
+      } else if (ids.length >= 2) {
+        const selected = s.clips.filter((c) => ids.includes(c.id));
+        anchor = Math.min(...selected.map((c) => c.startTime));
+        targets = ids;
+      } else {
+        anchor = Math.min(...s.clips.map((c) => c.startTime));
+        targets = s.clips.map((c) => c.id);
+      }
       return {
-        clips: s.clips.map((c) =>
-          s.selectedClipIds.includes(c.id) ? { ...c, startTime: earliest } : c,
-        ),
+        clips: s.clips.map((c) => (targets.includes(c.id) ? { ...c, startTime: anchor } : c)),
       };
     }),
 
