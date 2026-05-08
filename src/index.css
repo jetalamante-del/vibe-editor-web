@@ -58,3 +58,59 @@ select:focus-visible {
     scroll-behavior: auto !important;
   }
 }
+
+/* Editor-themed range slider — replaces the browser default thumb/track
+   so the scrub bar matches the rest of the UI in any browser. */
+input[type="range"].editor-range {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  height: 18px;
+  cursor: pointer;
+}
+input[type="range"].editor-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-surface-2);
+}
+input[type="range"].editor-range::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-surface-2);
+}
+input[type="range"].editor-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  border: 2px solid var(--color-bg);
+  margin-top: -5px;
+  box-shadow: 0 0 0 1px var(--color-accent);
+}
+input[type="range"].editor-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  border: 2px solid var(--color-bg);
+  box-shadow: 0 0 0 1px var(--color-accent);
+}
+input[type="range"].editor-range:disabled {
+  opacity: 0.4;
+}
+
+/* Screen-reader-only utility (Tailwind ships this, but explicit definition
+   keeps the helper text reliable across upgrades). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

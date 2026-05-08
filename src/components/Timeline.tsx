@@ -292,6 +292,19 @@ export function Timeline() {
 
       {menu && (
         <div
+          ref={(el) => {
+            if (!el) return;
+            // Clamp the menu inside the viewport so right-clicks near the
+            // bottom or right edge don't push it off-screen.
+            const rect = el.getBoundingClientRect();
+            const pad = 8;
+            const maxLeft = window.innerWidth - rect.width - pad;
+            const maxTop = window.innerHeight - rect.height - pad;
+            if (rect.left > maxLeft) el.style.left = `${Math.max(pad, maxLeft)}px`;
+            if (rect.top > maxTop) el.style.top = `${Math.max(pad, maxTop)}px`;
+          }}
+          role="menu"
+          aria-label="Clip actions"
           className="fixed z-50 bg-surface-1 border border-border rounded-md shadow-xl py-1 text-sm min-w-[200px]"
           style={{ left: menu.x, top: menu.y }}
           onContextMenu={(e) => e.preventDefault()}
@@ -333,12 +346,14 @@ function MenuItem({
 }) {
   return (
     <button
+      type="button"
+      role="menuitem"
       onClick={(e) => {
         e.stopPropagation();
         if (!disabled) onClick();
       }}
       disabled={disabled}
-      className="w-full text-left px-3 py-1.5 hover:bg-surface-2 disabled:opacity-40 disabled:hover:bg-transparent flex items-center gap-2"
+      className="w-full text-left px-3 py-2 min-h-[36px] hover:bg-surface-2 disabled:opacity-40 disabled:hover:bg-transparent flex items-center gap-2"
     >
       {children}
     </button>

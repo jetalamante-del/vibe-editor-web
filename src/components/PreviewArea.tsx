@@ -101,7 +101,7 @@ export const PreviewArea = forwardRef<HTMLCanvasElement, Props>(function Preview
           disabled={seekDisabled || !hasContent}
           aria-label="Playback position"
           aria-valuetext={fmt(currentTime)}
-          className="flex-1 accent-cyan-400 disabled:opacity-40"
+          className="editor-range flex-1"
         />
         {seekDisabled && seekDisabledReason && (
           <span className="text-[10px] text-warning/80 hidden lg:block">{seekDisabledReason}</span>
