@@ -22,6 +22,7 @@
 import { createFile, DataStream } from "mp4box";
 import { findTopLevelBoxes } from "./mp4BoxScanner";
 import { buildSampleTable, type Sample } from "./mp4SampleTable";
+import { devLog, devWarn } from "./dev";
 
 export interface DemuxedTrack {
   codec: string;
@@ -95,9 +96,9 @@ export function demuxMp4Streaming(file: File, cbs: StreamingCallbacks): DemuxHan
 
   (async () => {
     try {
-      console.log("[demux] scanning top-level boxes…");
+      devLog("[demux] scanning top-level boxes…");
       const boxes = await findTopLevelBoxes(file);
-      console.log(
+      devLog(
         "[demux] boxes:",
         boxes.map((b) => `${b.type}@${b.start}+${b.size}`).join(", "),
       );
@@ -106,7 +107,7 @@ export function demuxMp4Streaming(file: File, cbs: StreamingCallbacks): DemuxHan
       const mdats = boxes.filter((b) => b.type === "mdat");
       if (!moov) throw new Error(`MP4 has no moov box. Found: ${boxes.map((b) => b.type).join(", ") || "nothing"}`);
       if (mdats.length === 0) throw new Error("MP4 has no mdat box (no media data)");
-      console.log(`[demux] moov @ ${moov.start} (${(moov.size / 1024).toFixed(1)} KB), mdats: ${mdats.length}, total mdat: ${(mdats.reduce((a, m) => a + m.size, 0) / 1024 / 1024).toFixed(1)} MB`);
+      devLog(`[demux] moov @ ${moov.start} (${(moov.size / 1024).toFixed(1)} KB), mdats: ${mdats.length}, total mdat: ${(mdats.reduce((a, m) => a + m.size, 0) / 1024 / 1024).toFixed(1)} MB`);
 
       const mp4box = createFile();
       let videoTrack: any = null;
@@ -121,25 +122,25 @@ export function demuxMp4Streaming(file: File, cbs: StreamingCallbacks): DemuxHan
 
       mp4box.onReady = (info: any) => {
         readyFired = true;
-        console.log("[demux] mp4box onReady — tracks:", info.tracks?.length, "video tracks:", info.videoTracks?.length);
+        devLog("[demux] mp4box onReady — tracks:", info.tracks?.length, "video tracks:", info.videoTracks?.length);
         videoTrack = info.videoTracks?.[0];
         if (!videoTrack) {
           cbs.onError(new Error(`No video track in file. Tracks: ${info.tracks?.map((t: any) => `${t.codec}/${t.type}`).join(", ") || "none"}`));
           aborted = true;
           return;
         }
-        console.log("[demux] selected video track:", videoTrack.codec, `${videoTrack.video?.width}×${videoTrack.video?.height}`, "samples:", videoTrack.nb_samples);
+        devLog("[demux] selected video track:", videoTrack.codec, `${videoTrack.video?.width}×${videoTrack.video?.height}`, "samples:", videoTrack.nb_samples);
+        videoTrackId = videoTrack.id;
+        const trak = mp4box.getTrackById(videoTrackId);
         let sampleTable: Sample[] = [];
         try {
-          sampleTable = buildSampleTable(mp4box.getTrackById(videoTrackId));
-          console.log(
+          sampleTable = buildSampleTable(trak);
+          devLog(
             `[demux] built sample table: ${sampleTable.length} samples, ${sampleTable.filter((s) => s.isSync).length} keyframes`,
           );
         } catch (e: any) {
-          console.warn("[demux] sample-table build failed; random-access seek will be disabled:", e?.message ?? e);
+          devWarn("[demux] sample-table build failed; random-access seek will be disabled:", e?.message ?? e);
         }
-        videoTrackId = videoTrack.id;
-        const trak = mp4box.getTrackById(videoTrackId);
         const track: DemuxedTrack = {
           codec: videoTrack.codec,
           description: extractDescription(trak),
@@ -177,7 +178,7 @@ export function demuxMp4Streaming(file: File, cbs: StreamingCallbacks): DemuxHan
       }
 
       // 2) Feed moov in one go — onReady fires here.
-      console.log(`[demux] feeding moov to mp4box at fileStart=${moov.start} (${moov.size} bytes)`);
+      devLog(`[demux] feeding moov to mp4box at fileStart=${moov.start} (${moov.size} bytes)`);
       const moovAb = (await file.slice(moov.start, moov.start + moov.size).arrayBuffer()) as ArrayBuffer & {
         fileStart?: number;
       };
@@ -185,7 +186,7 @@ export function demuxMp4Streaming(file: File, cbs: StreamingCallbacks): DemuxHan
       mp4box.appendBuffer(moovAb);
       if (aborted) return;
       if (!readyFired) {
-        console.warn(
+        devWarn(
           "[demux] mp4box did NOT fire onReady after receiving the moov box. This usually means mp4box couldn't find a recognizable trak inside moov, or expects boxes in a different order. Falling back to sequential append (entire file streamed in order).",
         );
         // Fall back: feed whole file in order. mp4box's release path still works.

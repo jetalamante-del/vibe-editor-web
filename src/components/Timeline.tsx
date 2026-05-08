@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Film, Music } from "lucide-react";
 import { projectDuration, useProjectStore, type Clip, type Track } from "../store/projectStore";
 
@@ -34,7 +34,6 @@ export function Timeline() {
   const tracks = useProjectStore((s) => s.tracks);
   const clips = useProjectStore((s) => s.clips);
   const assets = useProjectStore((s) => s.assets);
-  const currentTime = useProjectStore((s) => s.currentTime);
   const selectedClipIds = useProjectStore((s) => s.selectedClipIds);
   const selectClip = useProjectStore((s) => s.selectClip);
   const selectClips = useProjectStore((s) => s.selectClips);
@@ -274,12 +273,7 @@ export function Timeline() {
               />
             ))}
 
-            <div
-              className="absolute top-0 bottom-0 w-px bg-accent z-20 pointer-events-none"
-              style={{ left: currentTime * pps }}
-            >
-              <div className="w-2 h-2 -ml-[3px] bg-accent rounded-sm" />
-            </div>
+            <Playhead pps={pps} />
 
             {marquee && (
               <div
@@ -351,7 +345,24 @@ function MenuItem({
   );
 }
 
-function TrackRow({
+/**
+ * Standalone Playhead so the rest of the timeline doesn't re-render at the
+ * 60 fps tick of the player clock. Only this component subscribes to
+ * currentTime; everything else only re-renders when clips/tracks change.
+ */
+function Playhead({ pps }: { pps: number }) {
+  const currentTime = useProjectStore((s) => s.currentTime);
+  return (
+    <div
+      className="absolute top-0 bottom-0 w-px bg-accent z-20 pointer-events-none"
+      style={{ left: currentTime * pps }}
+    >
+      <div className="w-2 h-2 -ml-[3px] bg-accent rounded-sm" />
+    </div>
+  );
+}
+
+const TrackRow = memo(function TrackRow({
   track,
   clips,
   pps,
@@ -402,4 +413,4 @@ function TrackRow({
       })}
     </div>
   );
-}
+});
