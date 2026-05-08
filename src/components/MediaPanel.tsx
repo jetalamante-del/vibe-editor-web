@@ -1,8 +1,6 @@
 import { Film, Music, Plus, Upload } from "lucide-react";
 import { useProjectStore, type MediaAsset } from "../store/projectStore";
-
-const fmt = (s: number) =>
-  `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+import { fmtCoarse as fmt } from "../lib/timecode";
 
 export function MediaPanel({ onPick }: { onPick: () => void }) {
   const assets = useProjectStore((s) => s.assets);

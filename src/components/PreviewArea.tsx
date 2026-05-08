@@ -1,14 +1,7 @@
-import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
+import { Music, Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import { forwardRef } from "react";
 import { projectDuration, useProjectStore } from "../store/projectStore";
-
-const fmt = (s: number) => {
-  if (!Number.isFinite(s) || s < 0) s = 0;
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
-  const cs = Math.floor((s % 1) * 100);
-  return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
-};
+import { fmtPrecise as fmt } from "../lib/timecode";
 
 interface Props {
   onPlayPause: () => void;
@@ -25,6 +18,7 @@ export const PreviewArea = forwardRef<HTMLCanvasElement, Props>(function Preview
   const currentTime = useProjectStore((s) => s.currentTime);
   const duration = useProjectStore(projectDuration);
   const hasContent = useProjectStore((s) => s.assets.length > 0);
+  const hasVideo = useProjectStore((s) => s.assets.some((a) => a.kind === "video"));
 
   return (
     <section
@@ -32,14 +26,23 @@ export const PreviewArea = forwardRef<HTMLCanvasElement, Props>(function Preview
       className="flex-1 flex flex-col min-w-0 bg-bg"
     >
       <div className="flex-1 flex items-center justify-center p-6 min-h-0 overflow-hidden">
-        <div className="max-w-full max-h-full bg-black rounded-lg overflow-hidden shadow-2xl flex items-center justify-center" style={{ aspectRatio: "16 / 9" }}>
-          {hasContent ? (
-            <canvas ref={canvasRef} className="w-full h-full object-contain" aria-label="Video preview" />
-          ) : (
-            <div className="text-text-muted text-sm px-8 text-center">
+        <div
+          className="max-w-full max-h-full bg-black rounded-lg overflow-hidden shadow-2xl flex items-center justify-center relative"
+          style={{ aspectRatio: "16 / 9" }}
+        >
+          {/* The canvas is always mounted so the player ref is stable. When
+              there's no video asset, we lay an audio-only placeholder on top. */}
+          <canvas
+            ref={canvasRef}
+            className={`w-full h-full object-contain ${hasVideo ? "" : "invisible"}`}
+            aria-label="Video preview"
+          />
+          {!hasContent && (
+            <div className="absolute inset-0 flex items-center justify-center text-text-muted text-sm px-8 text-center">
               Drop video or audio onto the window to begin.
             </div>
           )}
+          {hasContent && !hasVideo && <AudioPreviewPlaceholder />}
         </div>
       </div>
 
@@ -107,3 +110,23 @@ export const PreviewArea = forwardRef<HTMLCanvasElement, Props>(function Preview
     </section>
   );
 });
+
+/** Audio-only placeholder. Static bars stand in for a real waveform — once
+ *  we decode the audio buffer we'll render samples here. */
+function AudioPreviewPlaceholder() {
+  const bars = 24;
+  return (
+    <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-text-muted">
+      <Music className="w-10 h-10 text-accent" aria-hidden />
+      <div className="flex items-end gap-1 h-16" role="img" aria-label="Audio playback indicator">
+        {Array.from({ length: bars }).map((_, i) => {
+          const h = 25 + 60 * Math.abs(Math.sin((i / bars) * Math.PI * 2 + i));
+          return (
+            <span key={i} className="w-1 rounded-full bg-accent/50" style={{ height: `${h}%` }} />
+          );
+        })}
+      </div>
+      <p className="text-xs">Audio only · waveform rendering coming soon</p>
+    </div>
+  );
+}
